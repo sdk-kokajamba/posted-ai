@@ -48,6 +48,6 @@ LOGGING_CONFIG = {
 }
 
 
-def setup_logging():
+def setup_logging() -> None:
     """Configures logging using a configuration dictionary.."""
     logging.config.dictConfig(LOGGING_CONFIG)

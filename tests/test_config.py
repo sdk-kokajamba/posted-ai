@@ -11,6 +11,7 @@ def test_admin_ids_are_parsed_from_comma_separated_string(monkeypatch: pytest.Mo
     monkeypatch.setenv("ADMIN_IDS", "1, 2,3")
 
     assert Settings(_env_file=None).admin_ids == [1, 2, 3]
+    assert Settings(_env_file=None).bot_token == "123:abc"
 
 
 def test_empty_values_fall_back_to_defaults(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -3,9 +3,9 @@
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.fsm.storage.base import BaseStorage
+from aiogram.fsm.storage.base import BaseStorage, DefaultKeyBuilder
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.fsm.storage.redis import DefaultKeyBuilder, RedisStorage
+from aiogram.fsm.storage.redis import RedisStorage
 
 from bot.config import Settings
 from bot.db.engine import create_engine, create_session_factory
