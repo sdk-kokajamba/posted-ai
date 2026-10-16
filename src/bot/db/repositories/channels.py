@@ -19,7 +19,7 @@ class ChannelPage:
     total: int
 
 
-class UserRepository:
+class ChannelRepository:
     """Data access for :class:`~bot.db.models.Channel`.
 
     The repository never commits: the transaction is owned by ``DbSessionMiddleware``.
@@ -58,18 +58,18 @@ class UserRepository:
 
         return channel
 
-    async def get(self, channel_id: int) -> Channel | None:
+    async def get(self, id: int) -> Channel | None:
         """Return the channel with the given internal ID, or ``None``."""
-        return await self._session.get(Channel, channel_id)
+        return await self._session.get(Channel, id)
 
-    async def delete(self, user_id: int, channel_pk: int) -> bool:
+    async def delete(self, user_id: int, id: int) -> bool:
         """Delete the user's channel by internal ID.
 
         Returns ``True`` if a row was removed, ``False`` if the channel does
         not exist or belongs to another user.
         """
         channel = await self._session.scalar(
-            select(Channel).where(Channel.id == channel_pk, Channel.user_id == user_id)
+            select(Channel).where(Channel.id == id, Channel.user_id == user_id)
         )
         if channel is None:
             return False
