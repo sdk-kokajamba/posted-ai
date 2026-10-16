@@ -1,15 +1,22 @@
 """Repository for channel records."""
 
+from dataclasses import dataclass
+
 from sqlalchemy import func, select
-from sqlalchemy.dialects.postgresql import insert as pg_insert
-from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.sql.expression import Insert
 
 from bot.db.models import Channel, ChannelCreateData
 from bot.exceptions import ChannelNameTakenError
 from bot.exceptions.repositories import ChannelAlreadyExistsError
+
+PER_PAGE = 8
+
+
+@dataclass(frozen=True, slots=True)
+class ChannelPage:
+    items: list[Channel]
+    total: int
 
 
 class UserRepository:
@@ -50,6 +57,63 @@ class UserRepository:
             raise ChannelAlreadyExistsError(data.channel_id, data.channel_name) from exc
 
         return channel
+
+    async def get(self, channel_id: int) -> Channel | None:
+        """Return the channel with the given internal ID, or ``None``."""
+        return await self._session.get(Channel, channel_id)
+
+    async def delete(self, user_id: int, channel_pk: int) -> bool:
+        """Delete the user's channel by internal ID.
+
+        Returns ``True`` if a row was removed, ``False`` if the channel does
+        not exist or belongs to another user.
+        """
+        channel = await self._session.scalar(
+            select(Channel).where(Channel.id == channel_pk, Channel.user_id == user_id)
+        )
+        if channel is None:
+            return False
+
+        await self._session.delete(channel)
+        return True
+
+    async def list_for_user(
+        self,
+        user_id: int,
+        *,
+        limit: int,
+        offset: int = 0,
+    ) -> list[Channel]:
+        """Return a page of the user's channels, ordered by insertion."""
+        statement = (
+            select(Channel)
+            .where(Channel.user_id == user_id)
+            .order_by(Channel.id)
+            .limit(limit)
+            .offset(offset)
+        )
+        return list(await self._session.scalars(statement))
+
+    async def count_for_user(self, user_id: int) -> int:
+        """Return the number of channels added by the user."""
+        statement = select(func.count()).select_from(Channel).where(Channel.user_id == user_id)
+        return int(await self._session.scalar(statement) or 0)
+
+    async def get_page(
+        self,
+        user_id: int,
+        *,
+        page: int,
+        per_page: int = PER_PAGE,
+    ) -> ChannelPage:
+        """Return one page of the user's channels together with the total count."""
+        if page < 1:
+            raise ValueError(f"page must be >= 1, got {page}")
+
+        offset = (page - 1) * per_page
+        items = await self.list_for_user(user_id, limit=per_page, offset=offset)
+        total = await self.count_for_user(user_id)
+        return ChannelPage(items=items, total=total)
 
     async def _ensure_name_is_free(self, user_id: int, channel_name: str) -> None:
         statement = (
