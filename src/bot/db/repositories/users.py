@@ -2,14 +2,13 @@
 
 from typing import Any
 
-from aiogram.types import User as TgUser
 from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.expression import Insert
 
-from bot.db.models import User
+from bot.db.models import User, UserCreateData
 
 
 class UserRepository:
@@ -25,21 +24,21 @@ class UserRepository:
         """Return the user with the given Telegram ID, or ``None``."""
         return await self._session.get(User, user_id)
 
-    async def get_or_create(self, tg_user: TgUser) -> tuple[User, bool]:
-        """Return the stored user for ``tg_user`` and whether it was created just now.
+    async def get_or_create(self, data: UserCreateData) -> tuple[User, bool]:
+        """Return the stored user for ``UserCreateData`` and whether it was created just now.
 
         Profile fields of existing users are refreshed. The insert uses ON CONFLICT DO
         NOTHING, so simultaneous first updates from one user cannot raise IntegrityError.
         """
-        user = await self.get(tg_user.id)
+        user = await self.get(data.user_id)
         if user is not None:
-            self._refresh_profile(user, tg_user)
+            self._refresh_profile(user, data)
             return user, False
 
-        await self._session.execute(self._insert_if_missing(tg_user))
-        user = await self.get(tg_user.id)
+        await self._session.execute(self._insert_if_missing(data))
+        user = await self.get(data.user_id)
         if user is None:  # pragma: no cover - the row was inserted a moment ago
-            raise RuntimeError(f"User {tg_user.id} is missing right after insert")
+            raise RuntimeError(f"User {data.user_id} is missing right after insert")
         return user, True
 
     async def count(self) -> int:
@@ -54,20 +53,20 @@ class UserRepository:
         return int(total or 0)
 
     @staticmethod
-    def _refresh_profile(user: User, tg_user: TgUser) -> None:
+    def _refresh_profile(user: User, data: UserCreateData) -> None:
         # Assigning an unchanged value does not produce an UPDATE.
-        user.username = tg_user.username
-        user.first_name = tg_user.first_name
-        user.last_name = tg_user.last_name
-        user.language_code = tg_user.language_code
+        user.username = data.username
+        user.first_name = data.first_name
+        user.last_name = data.last_name
+        user.language_code = data.language_code
 
-    def _insert_if_missing(self, tg_user: TgUser) -> Insert:
+    def _insert_if_missing(self, data: UserCreateData) -> Insert:
         values: dict[str, Any] = {
-            "id": tg_user.id,
-            "username": tg_user.username,
-            "first_name": tg_user.first_name,
-            "last_name": tg_user.last_name,
-            "language_code": tg_user.language_code,
+            "id": data.user_id,
+            "username": data.username,
+            "first_name": data.first_name,
+            "last_name": data.last_name,
+            "language_code": data.language_code,
         }
         dialect = self._session.get_bind().dialect.name
         if dialect == "postgresql":

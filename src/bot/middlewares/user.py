@@ -7,6 +7,7 @@ from aiogram import BaseMiddleware
 from aiogram.types import TelegramObject, User
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from bot.db.models.user import UserCreateData
 from bot.db.repositories import UserRepository
 from bot.middlewares.types import Handler
 
@@ -31,7 +32,14 @@ class UserMiddleware(BaseMiddleware):
             return await handler(event, data)
 
         session: AsyncSession = data["session"]
-        user, created = await UserRepository(session).get_or_create(tg_user)
+        profile = UserCreateData(
+            user_id=tg_user.id,
+            username=tg_user.username,
+            first_name=tg_user.first_name,
+            last_name=tg_user.last_name,
+            language_code=tg_user.language_code,
+        )
+        user, created = await UserRepository(session).get_or_create(profile)
         # Persist right away: the connection goes back to the pool before the handler talks
         # to Telegram, and SQLite does not keep its write lock during that time.
         await session.commit()

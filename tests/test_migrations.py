@@ -24,7 +24,7 @@ def test_upgrade_and_downgrade(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     config = Config(str(ROOT / "alembic.ini"))
 
     command.upgrade(config, "head")
-    assert EXPECTED_TABLES <= table_names(database)
+    assert table_names(database) >= EXPECTED_TABLES
 
     command.downgrade(config, "base")
     assert EXPECTED_TABLES.isdisjoint(table_names(database))

@@ -9,7 +9,7 @@ from aiogram import types
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.config import Settings
-from bot.db.models import User
+from bot.db.models import User, UserCreateData
 from bot.db.repositories import UserRepository
 from bot.filters import IsAdmin
 from bot.handlers.admin import cmd_stats
@@ -69,8 +69,8 @@ def test_profile_is_rendered_and_escaped() -> None:
 
 async def test_stats_reports_user_counts(session: AsyncSession) -> None:
     repository = UserRepository(session)
-    await repository.get_or_create(types.User(id=1, is_bot=False, first_name="A"))
-    blocked, _ = await repository.get_or_create(types.User(id=2, is_bot=False, first_name="B"))
+    await repository.get_or_create(UserCreateData(user_id=1, first_name="A"))
+    blocked, _ = await repository.get_or_create(UserCreateData(user_id=2, first_name="B"))
     blocked.is_blocked = True
     message = AsyncMock()
 

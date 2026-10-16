@@ -1,5 +1,7 @@
 """User model."""
 
+from dataclasses import dataclass
+
 from sqlalchemy import BigInteger, Boolean, String, false
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -26,3 +28,12 @@ class User(TimestampMixin, Base):
 
     def __repr__(self) -> str:
         return f"User(id={self.id}, username={self.username!r})"
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class UserCreateData:
+    user_id: int
+    username: str | None = None
+    first_name: str
+    last_name: str | None = None
+    language_code: str | None = None
