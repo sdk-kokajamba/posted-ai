@@ -9,6 +9,7 @@ from alembic import command
 from alembic.config import Config
 
 ROOT = Path(__file__).resolve().parents[1]
+EXPECTED_TABLES = {"users", "channels"}
 
 
 def table_names(database: Path) -> set[str]:
@@ -23,7 +24,7 @@ def test_upgrade_and_downgrade(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     config = Config(str(ROOT / "alembic.ini"))
 
     command.upgrade(config, "head")
-    assert "users" in table_names(database)
+    assert EXPECTED_TABLES <= table_names(database)
 
     command.downgrade(config, "base")
-    assert "users" not in table_names(database)
+    assert EXPECTED_TABLES.isdisjoint(table_names(database))

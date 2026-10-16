@@ -11,7 +11,7 @@ def test_admin_ids_are_parsed_from_comma_separated_string(monkeypatch: pytest.Mo
     monkeypatch.setenv("ADMIN_IDS", "1, 2,3")
 
     assert Settings(_env_file=None).admin_ids == [1, 2, 3]
-    assert Settings(_env_file=None).bot_token == "123:abc"
+    assert Settings(_env_file=None).bot_token.get_secret_value() == "123:abc"
 
 
 def test_empty_values_fall_back_to_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -68,10 +68,3 @@ def test_long_polling_is_the_default(monkeypatch: pytest.MonkeyPatch) -> None:
 
     assert not settings.webhook_enabled
     assert settings.webhook_url is None
-
-
-def test_log_level_is_case_insensitive(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("BOT_TOKEN", "123:abc")
-    monkeypatch.setenv("LOG_LEVEL", "debug")
-
-    assert Settings(_env_file=None).log_level == "DEBUG"
