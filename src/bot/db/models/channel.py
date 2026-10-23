@@ -31,6 +31,6 @@ class Channel(TimestampMixin, Base):
 
 @dataclass(frozen=True, kw_only=True, slots=True)
 class ChannelCreateData:
+    user_id: int
     channel_id: int
     channel_name: str
-    user_id: int

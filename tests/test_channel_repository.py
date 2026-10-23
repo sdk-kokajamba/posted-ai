@@ -6,8 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from bot.db.models import Channel, ChannelCreateData, User
 from bot.db.models.user import UserCreateData
 from bot.db.repositories import ChannelRepository, UserRepository
-from bot.exceptions import ChannelNameTakenError
-from bot.exceptions.repositories import ChannelAlreadyExistsError
+from bot.exceptions import ChannelAlreadyExistsError, ChannelNameTakenError, ChannelNotFoundError
 
 
 def create_data_channel(
@@ -94,17 +93,18 @@ async def test_create_duplicate_channel_id_raises(
         )
 
 
-async def test_get_channel(session: AsyncSession, user: User) -> None:
+async def test_get_channel(session: AsyncSession, user: User, second_user: User) -> None:
     repository = ChannelRepository(session)
     created = await repository.create(
         create_data_channel(channel_id=100, channel_name="news", user_id=user.id)
     )
 
-    fetched = await repository.get(created.id)
+    fetched = await repository.get(user.id, created.id)
     assert fetched is created
 
-    missing = await repository.get(99999)
-    assert missing is None
+    assert await repository.get(second_user.id, created.id) is None
+
+    assert await repository.get(user.id, 99999) is None
 
 
 async def test_delete_channel(session: AsyncSession, user: User, second_user: User) -> None:
@@ -114,17 +114,20 @@ async def test_delete_channel(session: AsyncSession, user: User, second_user: Us
     )
 
     # Deletion by another user does not work
-    assert await repository.delete(second_user.id, channel.id) is False
+    with pytest.raises(ChannelNotFoundError):
+        await repository.delete(second_user.id, channel.id)
+
     # The channel still exists
     assert await session.get(Channel, channel.id) is not None
 
     # Deletion by owner
-    assert await repository.delete(user.id, channel.id) is True
+    await repository.delete(user.id, channel.id)
     await session.flush()
     assert await session.get(Channel, channel.id) is None
 
     # Repeated deletion
-    assert await repository.delete(user.id, channel.id) is False
+    with pytest.raises(ChannelNotFoundError):
+        await repository.delete(user.id, channel.id)
 
 
 async def test_list_for_user(session: AsyncSession, user: User, second_user: User) -> None:

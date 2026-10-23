@@ -7,8 +7,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.db.models import Channel, ChannelCreateData
-from bot.exceptions import ChannelNameTakenError
-from bot.exceptions.repositories import ChannelAlreadyExistsError
+from bot.exceptions import ChannelAlreadyExistsError, ChannelNameTakenError, ChannelNotFoundError
 
 PER_PAGE = 8
 
@@ -32,8 +31,8 @@ class ChannelRepository:
         """Store a new channel for the user.
 
         Raises:
-            ChannelNameTakenError: the user already has a channel with this name.
-            ChannelAlreadyExistsError: a channel with this Telegram ID is already stored.
+            ``ChannelNameTakenError``: the user already has a channel with this name.
+            ``ChannelAlreadyExistsError``: a channel with this Telegram ID is already stored.
         """
         await self._ensure_name_is_free(data.user_id, data.channel_name)
 
@@ -50,32 +49,35 @@ class ChannelRepository:
             # let ``DbSessionMiddleware`` roll the transaction back.
             await self._session.flush()
 
-        except IntegrityError as exc:
+        except IntegrityError as exc:  # pragma: no cover - race safeguard
             # Reached when ``channel_id`` (UNIQUE) collides. A foreign-key
             # violation would land here too, but ``user_id`` is guaranteed to
             # exist by the time the repository is called (UserMiddleware).
+            #
+            # Race safeguard: ``_ensure_name_is_free`` already rejects taken
+            # names, so a concurrent INSERT is the only realistic way for the
+            # ``(user_id, channel_name)`` UNIQUE to be reached.
             raise ChannelAlreadyExistsError(data.channel_id, data.channel_name) from exc
 
         return channel
 
-    async def get(self, id: int) -> Channel | None:
-        """Return the channel with the given internal ID, or ``None``."""
-        return await self._session.get(Channel, id)
-
-    async def delete(self, user_id: int, id: int) -> bool:
-        """Delete the user's channel by internal ID.
-
-        Returns ``True`` if a row was removed, ``False`` if the channel does
-        not exist or belongs to another user.
-        """
-        channel = await self._session.scalar(
+    async def get(self, user_id: int, id: int) -> Channel | None:
+        """Return the user's channel with the given ID, or ``None``."""
+        return await self._session.scalar(
             select(Channel).where(Channel.id == id, Channel.user_id == user_id)
         )
+
+    async def delete(self, user_id: int, id: int) -> None:
+        """Delete the user's channel by ID.
+
+        Raises:
+            ``ChannelNotFoundError``: the channel does not exist or belongs to another user.
+        """
+        channel = await self.get(user_id, id)
         if channel is None:
-            return False
+            raise ChannelNotFoundError(channel_id=id)
 
         await self._session.delete(channel)
-        return True
 
     async def list_for_user(
         self,
