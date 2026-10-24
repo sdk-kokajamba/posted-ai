@@ -244,7 +244,7 @@ class PostRepository:
         result = await self._session.execute(statement)
 
         # Cast the result to ``CursorResult`` so the type checker knows .rowcount exists.
-        result = cast(CursorResult, result)
+        result = cast("CursorResult[Any]", result)
         return result.rowcount or 0
 
     async def delete_invalid_moder(self, *, older_than: int) -> int:
@@ -272,7 +272,7 @@ class PostRepository:
         result = await self._session.execute(statement)
 
         # Cast the result to ``CursorResult`` so the type checker knows .rowcount exists.
-        result = cast(CursorResult, result)
+        result = cast("CursorResult[Any]", result)
         return result.rowcount or 0
 
     async def delete_overdue_published(
@@ -295,7 +295,7 @@ class PostRepository:
         result = await self._session.execute(statement)
 
         # Cast the result to ``CursorResult`` so the type checker knows .rowcount exists.
-        result = cast(CursorResult, result)
+        result = cast("CursorResult[Any]", result)
         return result.rowcount or 0
 
     # ------------------------------------------------------------- helpers
