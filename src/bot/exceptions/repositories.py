@@ -60,3 +60,37 @@ class PromptNameTakenError(PromptError):
     def __init__(self, prompt_name: str):
         self.prompt_name = prompt_name
         super().__init__(f"A prompt with the name {prompt_name} already exists")
+
+
+class PostError(DomainError):
+    """Base for post-related domain errors."""
+
+
+class PostNotFoundError(PostError):
+    """Raised when the post with the given ID does not exist."""
+
+    user_message = "Пост не найден — возможно, он уже был удалён."
+
+    def __init__(self, post_id: int):
+        self.post_id = post_id
+        super().__init__(f"A post with the id {post_id} does not exist")
+
+
+class PostChannelMismatchError(PostError):
+    """Raised when the channel does not belong to the user."""
+
+    user_message = "Канал не принадлежит пользователю."
+
+    def __init__(self, channel_id: int):
+        self.channel_id = channel_id
+        super().__init__(f"Channel {channel_id} does not belong to the user")
+
+
+class PostContentTypeMismatchError(PostError):
+    """Raised when content does not match the declared content type."""
+
+    user_message = "Содержимое не соответствует типу контента."
+
+    def __init__(self, content_type: str):
+        self.content_type = content_type
+        super().__init__(f"Content does not match content_type {content_type!r}")

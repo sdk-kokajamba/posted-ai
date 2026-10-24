@@ -4,6 +4,13 @@ from bot.db.models.channel import (
     Channel,
     ChannelCreateData,
 )
+from bot.db.models.post import (
+    ContentType,
+    Post,
+    PostCreateData,
+    PostStatus,
+    PostUpdateData,
+)
 from bot.db.models.prompt import (
     Prompt,
     PromptCreateData,
@@ -16,6 +23,11 @@ from bot.db.models.user import (
 __all__ = [
     "Channel",
     "ChannelCreateData",
+    "ContentType",
+    "Post",
+    "PostCreateData",
+    "PostStatus",
+    "PostUpdateData",
     "Prompt",
     "PromptCreateData",
     "User",
