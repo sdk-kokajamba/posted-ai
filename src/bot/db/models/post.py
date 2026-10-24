@@ -41,6 +41,16 @@ class ContentType(StrEnum):
     VIDEO = "video"
 
 
+def _enum_values(enum_cls: type[StrEnum]) -> list[str]:
+    """Return the DB values for ``enum_cls``.
+
+    ``sa.Enum`` stores member *names* by default (``"TEXT"``, ``"PUB"``);
+    the CHECK constraint and everything else here assume *values*
+    (``"text"``, ``"pub"``), so opt in explicitly.
+    """
+    return [member.value for member in enum_cls]
+
+
 class Post(TimestampMixin, Base):
     """Posts scheduled for publication in a channel."""
 
@@ -60,7 +70,7 @@ class Post(TimestampMixin, Base):
             "(content_type = 'text' AND text IS NOT NULL AND text <> '') OR "
             "(content_type IN ('photo', 'video') "
             "AND media_id IS NOT NULL AND media_id <> '')",
-            name="ck_posts_content_matches_type",
+            name="content_matches_type",
         ),
         # Listings by status, ordered by publication date.
         Index(
@@ -85,13 +95,23 @@ class Post(TimestampMixin, Base):
     )
     channel_id: Mapped[int] = mapped_column(nullable=False)
     status: Mapped[PostStatus] = mapped_column(
-        Enum(PostStatus, native_enum=False, length=16),
+        Enum(
+            PostStatus,
+            native_enum=False,
+            length=16,
+            values_callable=_enum_values,
+        ),
         nullable=False,
         default=PostStatus.MODER,
         server_default=PostStatus.MODER.value,
     )
     content_type: Mapped[ContentType] = mapped_column(
-        Enum(ContentType, native_enum=False, length=16),
+        Enum(
+            ContentType,
+            native_enum=False,
+            length=16,
+            values_callable=_enum_values,
+        ),
         nullable=False,
         default=ContentType.TEXT,
         server_default=ContentType.TEXT.value,

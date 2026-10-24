@@ -1,9 +1,11 @@
 """Repository for post records."""
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, cast
 
-from sqlalchemy import CursorResult, Select, and_, delete, func, or_, select, update
+from sqlalchemy import Select, and_, delete, func, or_, select, update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -230,6 +232,8 @@ class PostRepository:
 
         ``now`` is supplied by the caller (unix timestamp) so the repository
         does not decide what "now" is — this keeps tests deterministic.
+        ``updated_at`` is set server-side: the column is DateTime, but
+        ``now`` is an int (the pub_date unit), so we cannot pass it through.
         Returns the number of affected rows.
         """
         conditions: list[Any] = [
@@ -240,34 +244,49 @@ class PostRepository:
         if user_id is not None:
             conditions.append(Post.user_id == user_id)
 
-        statement = update(Post).where(*conditions).values(status=PostStatus.ARCH, updated_at=now)
+        statement = (
+            update(Post)
+            .where(*conditions)
+            .values(status=PostStatus.ARCH, updated_at=func.now())
+            # Bulk UPDATE: keep in-session objects untouched. ``evaluate``
+            # would also fail on ``func.now()``.
+            .execution_options(synchronize_session=False)
+        )
         result = await self._session.execute(statement)
 
         # Cast the result to ``CursorResult`` so the type checker knows .rowcount exists.
         result = cast("CursorResult[Any]", result)
         return result.rowcount or 0
 
-    async def delete_invalid_moder(self, *, older_than: int) -> int:
+    async def delete_invalid_moder(self, *, older_than: datetime) -> int:
         """Delete moderation posts with empty content or older than ``older_than``.
 
+        ``older_than`` is a ``datetime`` because ``created_at`` is a DateTime
+        column; passing an int (unix timestamp) would compare a datetime
+        string against a number and silently match everything or nothing.
         Returns the number of affected rows.
         """
-        statement = delete(Post).where(
-            Post.status == PostStatus.MODER,
-            or_(
-                and_(
-                    Post.content_type == ContentType.TEXT,
-                    or_(Post.text.is_(None), Post.text == ""),
-                ),
-                and_(
-                    Post.content_type.in_([ContentType.PHOTO, ContentType.VIDEO]),
-                    or_(
-                        Post.media_id.is_(None),
-                        Post.media_id == "",
+        statement = (
+            delete(Post)
+            .where(
+                Post.status == PostStatus.MODER,
+                or_(
+                    and_(
+                        Post.content_type == ContentType.TEXT,
+                        or_(Post.text.is_(None), Post.text == ""),
                     ),
+                    and_(
+                        Post.content_type.in_([ContentType.PHOTO, ContentType.VIDEO]),
+                        or_(
+                            Post.media_id.is_(None),
+                            Post.media_id == "",
+                        ),
+                    ),
+                    Post.created_at < older_than,
                 ),
-                Post.created_at < older_than,
-            ),
+            )
+            # Bulk DELETE: keep in-session objects untouched.
+            .execution_options(synchronize_session=False)
         )
         result = await self._session.execute(statement)
 
@@ -287,10 +306,15 @@ class PostRepository:
         when the post is actually published.
         Returns the number of affected rows.
         """
-        statement = delete(Post).where(
-            Post.status.in_([PostStatus.PUB, PostStatus.AP_PUB]),
-            Post.pub_date.is_not(None),
-            Post.pub_date < now - retention_seconds,
+        statement = (
+            delete(Post)
+            .where(
+                Post.status.in_([PostStatus.PUB, PostStatus.AP_PUB]),
+                Post.pub_date.is_not(None),
+                Post.pub_date < now - retention_seconds,
+            )
+            # Bulk DELETE: keep in-session objects untouched.
+            .execution_options(synchronize_session=False)
         )
         result = await self._session.execute(statement)
 

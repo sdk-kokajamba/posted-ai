@@ -779,7 +779,7 @@ async def test_delete_invalid_moder_by_age(
     published.created_at = datetime(2020, 1, 1)
     await session.flush()
 
-    count = await repository.delete_invalid_moder(older_than=datetime(2021, 1, 1).timestamp())
+    count = await repository.delete_invalid_moder(older_than=datetime(2021, 1, 1))
     assert count == 1
 
     # Check existence via raw id column, bypassing the identity map.
