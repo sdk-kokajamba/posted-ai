@@ -1,5 +1,11 @@
 """ORM models. Import every model here so Alembic autogenerate can see it."""
 
+from bot.db.models.autopost import (
+    AutoPost,
+    AutoPostCreateData,
+    AutoPostStatus,
+    AutoPostUpdateData,
+)
 from bot.db.models.channel import (
     Channel,
     ChannelCreateData,
@@ -21,6 +27,10 @@ from bot.db.models.user import (
 )
 
 __all__ = [
+    "AutoPost",
+    "AutoPostCreateData",
+    "AutoPostStatus",
+    "AutoPostUpdateData",
     "Channel",
     "ChannelCreateData",
     "ContentType",

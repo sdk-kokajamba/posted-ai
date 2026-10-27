@@ -8,7 +8,6 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     CheckConstraint,
-    Enum,
     ForeignKey,
     ForeignKeyConstraint,
     Index,
@@ -22,6 +21,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column
 
 from bot.db.base import Base, TimestampMixin
+from bot.db.enums import enum_column
 
 # BigInteger for PostgreSQL, INTEGER for SQLite (need for AUTOINCREMENT)
 BigIntPK = BigInteger().with_variant(Integer, "sqlite")
@@ -39,16 +39,6 @@ class ContentType(StrEnum):
     TEXT = "text"
     PHOTO = "photo"
     VIDEO = "video"
-
-
-def _enum_values(enum_cls: type[StrEnum]) -> list[str]:
-    """Return the DB values for ``enum_cls``.
-
-    ``sa.Enum`` stores member *names* by default (``"TEXT"``, ``"PUB"``);
-    the CHECK constraint and everything else here assume *values*
-    (``"text"``, ``"pub"``), so opt in explicitly.
-    """
-    return [member.value for member in enum_cls]
 
 
 class Post(TimestampMixin, Base):
@@ -95,23 +85,13 @@ class Post(TimestampMixin, Base):
     )
     channel_id: Mapped[int] = mapped_column(nullable=False)
     status: Mapped[PostStatus] = mapped_column(
-        Enum(
-            PostStatus,
-            native_enum=False,
-            length=16,
-            values_callable=_enum_values,
-        ),
+        enum_column(PostStatus),
         nullable=False,
         default=PostStatus.MODER,
         server_default=PostStatus.MODER.value,
     )
     content_type: Mapped[ContentType] = mapped_column(
-        Enum(
-            ContentType,
-            native_enum=False,
-            length=16,
-            values_callable=_enum_values,
-        ),
+        enum_column(ContentType),
         nullable=False,
         default=ContentType.TEXT,
         server_default=ContentType.TEXT.value,

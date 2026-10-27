@@ -1,6 +1,9 @@
 """Exceptions: the single place where all access to errors is concentrated"""
 
 from bot.exceptions.repositories import (
+    AutoPostChannelMismatchError,
+    AutoPostNameTakenError,
+    AutoPostNotFoundError,
     ChannelAlreadyExistsError,
     ChannelNameTakenError,
     ChannelNotFoundError,
@@ -12,6 +15,9 @@ from bot.exceptions.repositories import (
 )
 
 __all__ = [
+    "AutoPostChannelMismatchError",
+    "AutoPostNameTakenError",
+    "AutoPostNotFoundError",
     "ChannelAlreadyExistsError",
     "ChannelNameTakenError",
     "ChannelNotFoundError",

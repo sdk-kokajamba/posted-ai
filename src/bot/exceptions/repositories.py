@@ -94,3 +94,37 @@ class PostContentTypeMismatchError(PostError):
     def __init__(self, content_type: str):
         self.content_type = content_type
         super().__init__(f"Content does not match content_type {content_type!r}")
+
+
+class AutoPostError(DomainError):
+    """Base for auto post-related domain errors."""
+
+
+class AutoPostNotFoundError(AutoPostError):
+    """Raised when the auto post with the given ID does not exist."""
+
+    user_message = "Автопост не найден — возможно, он уже был удалён."
+
+    def __init__(self, autopost_id: int):
+        self.autopost_id = autopost_id
+        super().__init__(f"An auto post with the id {autopost_id} does not exist")
+
+
+class AutoPostNameTakenError(AutoPostError):
+    """Raised when the user already has an auto post with the given name."""
+
+    user_message = "Данное имя автопоста уже занято."
+
+    def __init__(self, name: str):
+        self.name = name
+        super().__init__(f"An auto post with the name {name} already exists")
+
+
+class AutoPostChannelMismatchError(AutoPostError):
+    """Raised when the channel does not belong to the user."""
+
+    user_message = "Канал не принадлежит пользователю."
+
+    def __init__(self, channel_id: int):
+        self.channel_id = channel_id
+        super().__init__(f"Channel {channel_id} does not belong to the user")
