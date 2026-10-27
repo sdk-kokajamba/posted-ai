@@ -128,3 +128,32 @@ class AutoPostChannelMismatchError(AutoPostError):
     def __init__(self, channel_id: int):
         self.channel_id = channel_id
         super().__init__(f"Channel {channel_id} does not belong to the user")
+
+
+class AutoPromptError(DomainError):
+    """Base class for auto prompt errors."""
+
+
+class AutoPromptNotFoundError(AutoPromptError):
+    user_message = "Промпт автопоста не найден — возможно, он уже был удалён."
+
+    def __init__(self, prompt_id: int) -> None:
+        self.prompt_id = prompt_id
+        super().__init__(self.user_message)
+
+
+class AutoPromptAutopostMismatchError(AutoPromptError):
+    user_message = "Автопост не принадлежит пользователю."
+
+    def __init__(self, autopost_id: int) -> None:
+        self.autopost_id = autopost_id
+        super().__init__(self.user_message)
+
+
+class AutoPromptLimitExceededError(AutoPromptError):
+    user_message = "Достигнут лимит промптов для одного автопоста."
+
+    def __init__(self, autopost_id: int, max_count: int = 500) -> None:
+        self.autopost_id = autopost_id
+        self.max_count = max_count
+        super().__init__(self.user_message)

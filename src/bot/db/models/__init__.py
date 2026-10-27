@@ -6,6 +6,12 @@ from bot.db.models.autopost import (
     AutoPostStatus,
     AutoPostUpdateData,
 )
+from bot.db.models.autoprompt import (
+    AutoPrompt,
+    AutoPromptCreateData,
+    AutoPromptStatus,
+    AutoPromptUpdateData,
+)
 from bot.db.models.channel import (
     Channel,
     ChannelCreateData,
@@ -31,6 +37,10 @@ __all__ = [
     "AutoPostCreateData",
     "AutoPostStatus",
     "AutoPostUpdateData",
+    "AutoPrompt",
+    "AutoPromptCreateData",
+    "AutoPromptStatus",
+    "AutoPromptUpdateData",
     "Channel",
     "ChannelCreateData",
     "ContentType",
