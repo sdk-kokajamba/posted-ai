@@ -1,8 +1,7 @@
 """AutoPost model."""
 
-from dataclasses import MISSING, dataclass, field, fields
+from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any
 
 from sqlalchemy import (
     BigInteger,
@@ -19,6 +18,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from bot.db.base import Base, TimestampMixin
 from bot.db.enums import enum_column
+from bot.db.updates import UNSET, UnsetType, UpdateDataBase
 
 
 class AutoPostStatus(StrEnum):
@@ -97,23 +97,20 @@ class AutoPostCreateData:
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
-class AutoPostUpdateData:
-    """Partial update payload.
+class AutoPostUpdateData(UpdateDataBase):
+    """Partial update payload for auto-post records.
 
-    Fields that were not supplied by the caller default to :data:`MISSING`
-    and are skipped by :meth:`to_changes`. Passing ``field=None`` explicitly
-    clears the column (only valid for nullable fields).
+    Fields that were not supplied by the caller default to :data:`UNSET`
+    — "leave the column untouched" — and are skipped by :meth:`to_changes`.
+    Passing ``field=None`` explicitly clears the column (only valid for
+    nullable fields; non-nullable ones raise :class:`UpdateDataValidationError`).
     """
 
-    channel_id: int | None = field(default_factory=lambda: MISSING)  # type: ignore[assignment]
-    name: str | None = field(default_factory=lambda: MISSING)  # type: ignore[assignment]
-    status: AutoPostStatus | None = field(default_factory=lambda: MISSING)  # type: ignore[assignment]
-    require_moderation: bool | None = field(default_factory=lambda: MISSING)  # type: ignore[assignment]
+    channel_id: int | UnsetType = UNSET
+    name: str | UnsetType = UNSET
+    status: AutoPostStatus | UnsetType = UNSET
+    require_moderation: bool | UnsetType = UNSET
 
-    def to_changes(self) -> dict[str, Any]:
-        """Return only the fields explicitly set on this instance."""
-        return {
-            f.name: getattr(self, f.name)
-            for f in fields(self)
-            if getattr(self, f.name) is not MISSING
-        }
+    not_null_fields: frozenset[str] = frozenset(
+        {"channel_id", "name", "status", "require_moderation"}
+    )

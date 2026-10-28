@@ -16,6 +16,9 @@ from bot.exceptions.repositories import (
     PromptNameTakenError,
     PromptNotFoundError,
 )
+from bot.exceptions.validation import (
+    UpdateDataValidationError,
+)
 
 __all__ = [
     "AutoPostChannelMismatchError",
@@ -32,4 +35,5 @@ __all__ = [
     "PostNotFoundError",
     "PromptNameTakenError",
     "PromptNotFoundError",
+    "UpdateDataValidationError",
 ]

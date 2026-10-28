@@ -1,8 +1,7 @@
 """Post model."""
 
-from dataclasses import MISSING, dataclass, field, fields
+from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any
 
 from sqlalchemy import (
     BigInteger,
@@ -22,6 +21,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from bot.db.base import Base, TimestampMixin
 from bot.db.enums import enum_column
+from bot.db.updates import UNSET, UnsetType, UpdateDataBase
 
 # BigInteger for PostgreSQL, INTEGER for SQLite (need for AUTOINCREMENT)
 BigIntPK = BigInteger().with_variant(Integer, "sqlite")
@@ -132,34 +132,28 @@ class PostCreateData:
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
-class PostUpdateData:
-    """Partial update payload.
+class PostUpdateData(UpdateDataBase):
+    """Partial update payload for post records.
 
-    Fields that were not supplied by the caller default to :data:`MISSING`
-    and are skipped by :meth:`to_changes`. Passing ``field=None`` explicitly
-    clears the column (only valid for nullable fields).
+    Fields that were not supplied by the caller default to :data:`UNSET`
+    — "leave the column untouched" — and are skipped by :meth:`to_changes`.
+    Passing ``field=None`` explicitly clears the column (only valid for
+    nullable fields; non-nullable ones raise :class:`UpdateDataValidationError`).
     """
 
-    # ``field(default_factory=lambda: MISSING)`` — using ``MISSING`` directly
-    # as a class-body default marks the field as *required* in ``__init__``
-    # (dataclasses treats ``default is MISSING`` as "no default"), which would
-    # break the "field absent = don't change" contract.
-    channel_id: int | None = field(default_factory=lambda: MISSING)  # type: ignore[assignment]
-    status: PostStatus | None = field(default_factory=lambda: MISSING)  # type: ignore[assignment]
-    content_type: ContentType | None = field(default_factory=lambda: MISSING)  # type: ignore[assignment]
-    theme: str | None = field(default_factory=lambda: MISSING)  # type: ignore[assignment]
-    text: str | None = field(default_factory=lambda: MISSING)  # type: ignore[assignment]
-    text_html: str | None = field(default_factory=lambda: MISSING)  # type: ignore[assignment]
-    media_id: str | None = field(default_factory=lambda: MISSING)  # type: ignore[assignment]
-    pub_date: int | None = field(default_factory=lambda: MISSING)  # type: ignore[assignment]
-    msg_id: int | None = field(default_factory=lambda: MISSING)  # type: ignore[assignment]
-    spoiler: bool | None = field(default_factory=lambda: MISSING)  # type: ignore[assignment]
-    msg_delete: int | None = field(default_factory=lambda: MISSING)  # type: ignore[assignment]
+    channel_id: int | UnsetType = UNSET
+    status: PostStatus | UnsetType = UNSET
+    content_type: ContentType | UnsetType = UNSET
+    theme: str | UnsetType = UNSET
+    spoiler: bool | UnsetType = UNSET
 
-    def to_changes(self) -> dict[str, Any]:
-        """Return only the fields explicitly set on this instance."""
-        return {
-            f.name: getattr(self, f.name)
-            for f in fields(self)
-            if getattr(self, f.name) is not MISSING
-        }
+    text: str | UnsetType = UNSET
+    text_html: str | UnsetType = UNSET
+    media_id: str | UnsetType = UNSET
+    pub_date: int | UnsetType = UNSET
+    msg_id: int | UnsetType = UNSET
+    msg_delete: int | UnsetType = UNSET
+
+    not_null_fields: frozenset[str] = frozenset(
+        {"channel_id", "status", "content_type", "theme", "spoiler"}
+    )

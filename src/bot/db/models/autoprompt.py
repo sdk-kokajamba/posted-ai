@@ -1,8 +1,7 @@
 """AutoPrompt model."""
 
-from dataclasses import MISSING, dataclass, field, fields
+from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any
 
 from sqlalchemy import (
     BigInteger,
@@ -19,6 +18,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from bot.db.base import Base, TimestampMixin
 from bot.db.enums import enum_column
+from bot.db.updates import UNSET, UnsetType, UpdateDataBase
 
 
 class AutoPromptStatus(StrEnum):
@@ -107,30 +107,24 @@ class AutoPromptCreateData:
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
-class AutoPromptUpdateData:
-    """Partial update payload.
+class AutoPromptUpdateData(UpdateDataBase):
+    """Partial update payload for auto-prompt records.
 
-    Fields that were not supplied by the caller default to :data:`MISSING`
-    and are skipped by :meth:`to_changes`. Passing ``field=None`` explicitly
-    clears the column (only valid for nullable fields).
+    Fields that were not supplied by the caller default to :data:`UNSET`
+    — "leave the column untouched" — and are skipped by :meth:`to_changes`.
+    Passing ``field=None`` explicitly clears the column (only valid for
+    nullable fields; non-nullable ones raise :class:`UpdateDataValidationError`).
     """
 
-    # ``field(default_factory=lambda: MISSING)`` — using ``MISSING`` directly
-    # as a class-body default marks the field as *required* in ``__init__``
-    # (dataclasses treats ``default is MISSING`` as "no default"), which would
-    # break the "field absent = don't change" contract.
-    autopost_id: int | None = field(default_factory=lambda: MISSING)  # type: ignore[assignment]
-    status: AutoPromptStatus | None = field(default_factory=lambda: MISSING)  # type: ignore[assignment]
-    req_moder: bool | None = field(default_factory=lambda: MISSING)  # type: ignore[assignment]
-    prompt_text: str | None = field(default_factory=lambda: MISSING)  # type: ignore[assignment]
-    tags: str | None = field(default_factory=lambda: MISSING)  # type: ignore[assignment]
-    day_pub: str | None = field(default_factory=lambda: MISSING)  # type: ignore[assignment]
-    time_pub: str | None = field(default_factory=lambda: MISSING)  # type: ignore[assignment]
+    autopost_id: int | UnsetType = UNSET
+    status: AutoPromptStatus | UnsetType = UNSET
+    req_moder: bool | UnsetType = UNSET
+    prompt_text: str | UnsetType = UNSET
 
-    def to_changes(self) -> dict[str, Any]:
-        """Return only the fields explicitly set on this instance."""
-        return {
-            f.name: getattr(self, f.name)
-            for f in fields(self)
-            if getattr(self, f.name) is not MISSING
-        }
+    tags: str | UnsetType = UNSET
+    day_pub: str | UnsetType = UNSET
+    time_pub: str | UnsetType = UNSET
+
+    not_null_fields: frozenset[str] = frozenset(
+        {"autopost_id", "status", "req_moder", "prompt_text"}
+    )
