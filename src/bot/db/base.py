@@ -2,8 +2,11 @@
 
 from datetime import UTC, datetime
 
-from sqlalchemy import DateTime, MetaData, func
+from sqlalchemy import BigInteger, DateTime, Integer, MetaData, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+# BigInteger for PostgreSQL, INTEGER for SQLite (need for AUTOINCREMENT)
+BigIntPK = BigInteger().with_variant(Integer, "sqlite")
 
 
 def utcnow() -> datetime:

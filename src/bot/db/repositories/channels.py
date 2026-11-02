@@ -34,11 +34,11 @@ class ChannelRepository:
             ``ChannelNameTakenError``: the user already has a channel with this name.
             ``ChannelAlreadyExistsError``: a channel with this Telegram ID is already stored.
         """
-        await self._ensure_name_is_free(data.user_id, data.channel_name)
+        await self._ensure_name_is_free(data.user_id, data.name)
 
         channel = Channel(
-            channel_id=data.channel_id,
-            channel_name=data.channel_name,
+            tg_id=data.tg_id,
+            name=data.name,
             user_id=data.user_id,
         )
         self._session.add(channel)
@@ -50,14 +50,14 @@ class ChannelRepository:
             await self._session.flush()
 
         except IntegrityError as exc:  # pragma: no cover - race safeguard
-            # Reached when ``channel_id`` (UNIQUE) collides. A foreign-key
+            # Reached when ``tg_id`` (UNIQUE) collides. A foreign-key
             # violation would land here too, but ``user_id`` is guaranteed to
             # exist by the time the repository is called (UserMiddleware).
             #
             # Race safeguard: ``_ensure_name_is_free`` already rejects taken
             # names, so a concurrent INSERT is the only realistic way for the
-            # ``(user_id, channel_name)`` UNIQUE to be reached.
-            raise ChannelAlreadyExistsError(data.channel_id, data.channel_name) from exc
+            # ``uq_channels_user_name`` UNIQUE to be reached.
+            raise ChannelAlreadyExistsError(data.tg_id, data.name) from exc
 
         return channel
 
@@ -120,7 +120,7 @@ class ChannelRepository:
     async def _ensure_name_is_free(self, user_id: int, channel_name: str) -> None:
         statement = (
             select(Channel.id)
-            .where(Channel.user_id == user_id, Channel.channel_name == channel_name)
+            .where(Channel.user_id == user_id, Channel.name == channel_name)
             .limit(1)
         )
         if await self._session.scalar(statement) is not None:

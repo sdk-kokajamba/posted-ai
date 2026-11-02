@@ -1,10 +1,9 @@
 """Repository for auto post records."""
 
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any
 
-from sqlalchemy import Select, delete, func, select
-from sqlalchemy.engine import CursorResult
+from sqlalchemy import Select, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -15,6 +14,7 @@ from bot.db.models import (
     AutoPostUpdateData,
     Channel,
 )
+from bot.db.ownership import ensure_owned
 from bot.exceptions import (
     AutoPostChannelMismatchError,
     AutoPostNameTakenError,
@@ -58,7 +58,7 @@ class AutoPostRepository:
             user_id=data.user_id,
             channel_id=data.channel_id,
             name=data.name,
-            require_moderation=data.require_moderation,
+            moderation=data.moderation,
             status=data.status,
         )
         self._session.add(autopost)
@@ -69,9 +69,12 @@ class AutoPostRepository:
             # ``DbSessionMiddleware`` roll the transaction back.
             await self._session.flush()
         except IntegrityError as exc:  # pragma: no cover - race / FK safeguard
-            # Pre-checks above already cover the common cases; this catches
-            # races between the check and the INSERT, plus the composite FK
-            # (channel taken by another user in the meantime).
+            # Pre-checks above already cover the common cases. This catches a
+            # race between ``_ensure_name_is_free`` and the INSERT (unique name)
+            # AND the composite FK from ``fk_autoposts_channel_owner`` if the
+            # channel was moved/deleted concurrently. Both map to
+            # ``AutoPostNameTakenError`` here — see the follow-up issue about
+            # splitting the IntegrityError by constraint name.
             raise AutoPostNameTakenError(data.name) from exc
 
         return autopost
@@ -120,6 +123,10 @@ class AutoPostRepository:
         try:
             await self._session.flush()
         except IntegrityError as exc:  # pragma: no cover - race / FK safeguard
+            # Same rationale as ``create``: the only realistic IntegrityError
+            # here is a concurrent unique-name collision or the composite
+            # ``fk_autoposts_channel_owner`` moving underneath us. Both map to
+            # ``AutoPostNameTakenError`` — see the follow-up issue.
             raise AutoPostNameTakenError(
                 changes.get("name", autopost.name),
             ) from exc
@@ -148,13 +155,6 @@ class AutoPostRepository:
                 AutoPost.user_id == user_id,
             )
         )
-
-    async def exists(self, user_id: int, id: int) -> bool:
-        """Return ``True`` if the user has an auto post with the given ID."""
-        statement = (
-            select(AutoPost.id).where(AutoPost.id == id, AutoPost.user_id == user_id).limit(1)
-        )
-        return await self._session.scalar(statement) is not None
 
     async def list_for_user(
         self,
@@ -219,28 +219,6 @@ class AutoPostRepository:
         )
         return AutoPostPage(items=items, total=total)
 
-    # -------------------------------------------------------------- bulk ops
-
-    async def delete_stale_moder(self, *, user_id: int | None = None) -> int:
-        """Delete auto posts stuck in ``AutoPostStatus.MODER``.
-
-        ``user_id`` optionally narrows the scope to a single user. Returns
-        the number of affected rows.
-
-        Without user_id the deletion is global — intended for cron cleanup
-        """
-        statement = delete(AutoPost).where(AutoPost.status == AutoPostStatus.MODER)
-        if user_id is not None:
-            statement = statement.where(AutoPost.user_id == user_id)
-        # Bulk DELETE: keep in-session objects untouched.
-        statement = statement.execution_options(synchronize_session=False)
-
-        result = await self._session.execute(statement)
-
-        # Cast so the type checker knows .rowcount exists.
-        result = cast("CursorResult[Any]", result)
-        return result.rowcount or 0
-
     # --------------------------------------------------------------- helpers
 
     @staticmethod
@@ -285,8 +263,11 @@ class AutoPostRepository:
         pre-check exists purely to surface a clear domain exception before
         ``flush``.
         """
-        statement = (
-            select(Channel.id).where(Channel.id == channel_id, Channel.user_id == user_id).limit(1)
+        await ensure_owned(
+            self._session,
+            column_id=Channel.id,
+            column_user_id=Channel.user_id,
+            pk=channel_id,
+            user_id=user_id,
+            error_factory=AutoPostChannelMismatchError,
         )
-        if await self._session.scalar(statement) is None:
-            raise AutoPostChannelMismatchError(channel_id)

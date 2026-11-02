@@ -7,10 +7,12 @@ from bot.db.models.autopost import (
     AutoPostUpdateData,
 )
 from bot.db.models.autoprompt import (
+    ALL_WEEKDAYS_MASK,
+    MINUTES_PER_DAY,
     AutoPrompt,
     AutoPromptCreateData,
-    AutoPromptStatus,
     AutoPromptUpdateData,
+    Weekday,
 )
 from bot.db.models.channel import (
     Channel,
@@ -33,13 +35,14 @@ from bot.db.models.user import (
 )
 
 __all__ = [
+    "ALL_WEEKDAYS_MASK",
+    "MINUTES_PER_DAY",
     "AutoPost",
     "AutoPostCreateData",
     "AutoPostStatus",
     "AutoPostUpdateData",
     "AutoPrompt",
     "AutoPromptCreateData",
-    "AutoPromptStatus",
     "AutoPromptUpdateData",
     "Channel",
     "ChannelCreateData",
@@ -52,4 +55,5 @@ __all__ = [
     "PromptCreateData",
     "User",
     "UserCreateData",
+    "Weekday",
 ]

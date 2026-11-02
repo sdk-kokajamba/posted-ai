@@ -9,6 +9,7 @@ from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from bot.db.base import utcnow
 from bot.db.models import (
     Channel,
     ContentType,
@@ -17,6 +18,7 @@ from bot.db.models import (
     PostStatus,
     PostUpdateData,
 )
+from bot.db.ownership import ensure_owned
 from bot.exceptions import (
     PostChannelMismatchError,
     PostContentTypeMismatchError,
@@ -48,11 +50,6 @@ class PostRepository:
         return await self._session.scalar(
             select(Post).where(Post.id == id, Post.user_id == user_id)
         )
-
-    async def exists(self, user_id: int, id: int) -> bool:
-        """Return ``True`` if the user has a post with the given ID."""
-        statement = select(Post.id).where(Post.id == id, Post.user_id == user_id).limit(1)
-        return await self._session.scalar(statement) is not None
 
     async def list_for_user(
         self,
@@ -156,9 +153,12 @@ class PostRepository:
         try:
             await self._session.flush()
         except IntegrityError as exc:  # pragma: no cover - race / FK safeguard
-            # Pre-checks above already cover the common cases; this catches
-            # races between the check and the INSERT, plus the composite FK
-            # (channel taken by another user in the meantime).
+            # Pre-checks above cover the common cases. This catches a race
+            # between ``_ensure_content_matches_type`` and the INSERT (check
+            # constraint) AND the composite FK from ``fk_posts_channel_owner``
+            # if the channel was moved/deleted concurrently. Both map to
+            # ``PostContentTypeMismatchError`` here — see the follow-up issue
+            # about splitting IntegrityError by constraint name.
             raise PostContentTypeMismatchError(str(data.content_type)) from exc
 
         return post
@@ -205,6 +205,11 @@ class PostRepository:
         try:
             await self._session.flush()
         except IntegrityError as exc:  # pragma: no cover - race / FK safeguard
+            # Content check and channel ownership are pre-validated above; a
+            # concurrent move of the channel (or its deletion) is the only
+            # realistic IntegrityError path here. Both cases map to
+            # ``PostContentTypeMismatchError`` — see the follow-up issue about
+            # splitting IntegrityError by constraint name.
             raise PostContentTypeMismatchError(str(post.content_type)) from exc
 
         return post
@@ -232,8 +237,9 @@ class PostRepository:
 
         ``now`` is supplied by the caller (unix timestamp) so the repository
         does not decide what "now" is — this keeps tests deterministic.
-        ``updated_at`` is set server-side: the column is DateTime, but
-        ``now`` is an int (the pub_date unit), so we cannot pass it through.
+        ``updated_at`` is also generated in Python (``utcnow()``) so its
+        storage format matches the ORM paths (see ``TimestampMixin``) on
+        both PostgreSQL and SQLite.
         Returns the number of affected rows.
         """
         conditions: list[Any] = [
@@ -247,9 +253,10 @@ class PostRepository:
         statement = (
             update(Post)
             .where(*conditions)
-            .values(status=PostStatus.ARCH, updated_at=func.now())
-            # Bulk UPDATE: keep in-session objects untouched. ``evaluate``
-            # would also fail on ``func.now()``.
+            .values(status=PostStatus.ARCH, updated_at=utcnow())
+            # Bulk UPDATE: keep in-session objects untouched — the caller owns
+            # the transaction and may hold ``Post`` instances that must not be
+            # silently mutated by this background sweep.
             .execution_options(synchronize_session=False)
         )
         result = await self._session.execute(statement)
@@ -349,11 +356,14 @@ class PostRepository:
         The composite FK on ``posts`` is the hard guarantee; this pre-check
         exists purely to surface a clear domain exception before ``flush``.
         """
-        statement = (
-            select(Channel.id).where(Channel.id == channel_id, Channel.user_id == user_id).limit(1)
+        await ensure_owned(
+            self._session,
+            column_id=Channel.id,
+            column_user_id=Channel.user_id,
+            pk=channel_id,
+            user_id=user_id,
+            error_factory=PostChannelMismatchError,
         )
-        if await self._session.scalar(statement) is None:
-            raise PostChannelMismatchError(channel_id)
 
     @staticmethod
     def _ensure_content_matches_type(

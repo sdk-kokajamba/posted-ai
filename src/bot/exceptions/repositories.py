@@ -22,9 +22,9 @@ class ChannelNameTakenError(ChannelError):
 
     user_message = "Данное имя канала уже занято."
 
-    def __init__(self, channel_name: str):
-        self.channel_name = channel_name
-        super().__init__(f"A channel with the name {channel_name} already exists")
+    def __init__(self, name: str):
+        self.name = name
+        super().__init__(f"A channel with the name {name} already exists")
 
 
 class ChannelAlreadyExistsError(ChannelError):
@@ -32,10 +32,10 @@ class ChannelAlreadyExistsError(ChannelError):
 
     user_message = "Канал уже добавлен."
 
-    def __init__(self, channel_id: int, channel_name: str):
-        self.channel_id = channel_id
-        self.channel_name = channel_name
-        super().__init__(f"A channel with the id {channel_id} already exists")
+    def __init__(self, tg_id: int, name: str):
+        self.tg_id = tg_id
+        self.name = name
+        super().__init__(f"A channel with the id {tg_id} already exists")
 
 
 class PromptError(DomainError):
@@ -57,9 +57,9 @@ class PromptNameTakenError(PromptError):
 
     user_message = "Данное имя промпта уже занято."
 
-    def __init__(self, prompt_name: str):
-        self.prompt_name = prompt_name
-        super().__init__(f"A prompt with the name {prompt_name} already exists")
+    def __init__(self, name: str):
+        self.name = name
+        super().__init__(f"A prompt with the name {name} already exists")
 
 
 class PostError(DomainError):

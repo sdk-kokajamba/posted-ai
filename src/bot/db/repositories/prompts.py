@@ -34,16 +34,15 @@ class PromptRepository:
         """Store a new prompt for the user.
 
         Raises:
-            PromptNameTakenError: the user already has a prompt with this name,
-                or — in the theoretically impossible case — the ``user_id``
-                does not exist (FK violation; not expected behind ``UserMiddleware``).
+            ``PromptNameTakenError``: the user already has a prompt with this name
+                (including a race on the ``uq_prompts_user_name`` constraint).
         """
-        await self._ensure_name_is_free(data.user_id, data.prompt_name)
+        await self._ensure_name_is_free(data.user_id, data.name)
 
         prompt = Prompt(
             user_id=data.user_id,
-            prompt_name=data.prompt_name,
-            prompt_text=data.prompt_text,
+            name=data.name,
+            text=data.text,
         )
         self._session.add(prompt)
         try:
@@ -53,15 +52,14 @@ class PromptRepository:
             # let ``DbSessionMiddleware`` roll the transaction back.
             await self._session.flush()
         except IntegrityError as exc:  # pragma: no cover - race safeguard
-            # Reached when ``(user_id, prompt_name)`` (UNIQUE) collides. A
-            # foreign-key violation would land here too, but ``user_id`` is
-            # guaranteed to exist by the time the repository is called
-            # (UserMiddleware).
+            # Reached when ``uq_prompts_user_name`` collides. A foreign-key
+            # violation would land here too, but ``user_id`` is guaranteed to
+            # exist by the time the repository is called (UserMiddleware).
             #
             # Race safeguard: ``_ensure_name_is_free`` already rejects taken
             # names, so a concurrent INSERT (two handlers for the same user
             # racing) is the only realistic way to reach this branch.
-            raise PromptNameTakenError(data.prompt_name) from exc
+            raise PromptNameTakenError(data.name) from exc
 
         return prompt
 
@@ -82,11 +80,6 @@ class PromptRepository:
             raise PromptNotFoundError(prompt_id=id)
 
         await self._session.delete(prompt)
-
-    async def exists(self, user_id: int) -> bool:
-        """Return ``True`` if the user has at least one prompt."""
-        statement = select(Prompt.id).where(Prompt.user_id == user_id).limit(1)
-        return await self._session.scalar(statement) is not None
 
     async def list_for_user(
         self,
@@ -129,12 +122,8 @@ class PromptRepository:
     async def _ensure_name_is_free(
         self,
         user_id: int,
-        prompt_name: str,
+        name: str,
     ) -> None:
-        statement = (
-            select(Prompt.id)
-            .where(Prompt.user_id == user_id, Prompt.prompt_name == prompt_name)
-            .limit(1)
-        )
+        statement = select(Prompt.id).where(Prompt.user_id == user_id, Prompt.name == name).limit(1)
         if await self._session.scalar(statement) is not None:
-            raise PromptNameTakenError(prompt_name)
+            raise PromptNameTakenError(name)

@@ -10,13 +10,13 @@ from bot.exceptions import ChannelAlreadyExistsError, ChannelNameTakenError, Cha
 
 
 def create_data_channel(
-    channel_id: int,
-    channel_name: str,
+    tg_id: int,
+    name: str,
     user_id: int,
 ) -> ChannelCreateData:
     return ChannelCreateData(
-        channel_id=channel_id,
-        channel_name=channel_name,
+        tg_id=tg_id,
+        name=name,
         user_id=user_id,
     )
 
@@ -53,51 +53,43 @@ async def second_user(session: AsyncSession) -> User:
 
 async def test_create_channel_success(session: AsyncSession, user: User) -> None:
     repository = ChannelRepository(session)
-    data = create_data_channel(channel_id=100, channel_name="news", user_id=user.id)
+    data = create_data_channel(tg_id=100, name="news", user_id=user.id)
 
     channel = await repository.create(data)
 
     assert channel.id is not None
-    assert channel.channel_id == 100
-    assert channel.channel_name == "news"
+    assert channel.tg_id == 100
+    assert channel.name == "news"
     assert channel.user_id == user.id
 
     stored = await session.get(Channel, channel.id)
     assert stored is not None
-    assert stored.channel_id == 100
+    assert stored.tg_id == 100
 
 
 async def test_create_duplicate_name_raises(session: AsyncSession, user: User) -> None:
     repository = ChannelRepository(session)
-    await repository.create(
-        create_data_channel(channel_id=100, channel_name="news", user_id=user.id)
-    )
+    await repository.create(create_data_channel(tg_id=100, name="news", user_id=user.id))
 
     with pytest.raises(ChannelNameTakenError):
-        await repository.create(
-            create_data_channel(channel_id=200, channel_name="news", user_id=user.id)
-        )
+        await repository.create(create_data_channel(tg_id=200, name="news", user_id=user.id))
 
 
 async def test_create_duplicate_channel_id_raises(
     session: AsyncSession, user: User, second_user: User
 ) -> None:
     repository = ChannelRepository(session)
-    await repository.create(
-        create_data_channel(channel_id=100, channel_name="news", user_id=user.id)
-    )
+    await repository.create(create_data_channel(tg_id=100, name="news", user_id=user.id))
 
     with pytest.raises(ChannelAlreadyExistsError):
         await repository.create(
-            create_data_channel(channel_id=100, channel_name="other", user_id=second_user.id)
+            create_data_channel(tg_id=100, name="other", user_id=second_user.id)
         )
 
 
 async def test_get_channel(session: AsyncSession, user: User, second_user: User) -> None:
     repository = ChannelRepository(session)
-    created = await repository.create(
-        create_data_channel(channel_id=100, channel_name="news", user_id=user.id)
-    )
+    created = await repository.create(create_data_channel(tg_id=100, name="news", user_id=user.id))
 
     fetched = await repository.get(user.id, created.id)
     assert fetched is created
@@ -109,9 +101,7 @@ async def test_get_channel(session: AsyncSession, user: User, second_user: User)
 
 async def test_delete_channel(session: AsyncSession, user: User, second_user: User) -> None:
     repository = ChannelRepository(session)
-    channel = await repository.create(
-        create_data_channel(channel_id=100, channel_name="news", user_id=user.id)
-    )
+    channel = await repository.create(create_data_channel(tg_id=100, name="news", user_id=user.id))
 
     # Deletion by another user does not work
     with pytest.raises(ChannelNotFoundError):
@@ -133,19 +123,11 @@ async def test_delete_channel(session: AsyncSession, user: User, second_user: Us
 async def test_list_for_user(session: AsyncSession, user: User, second_user: User) -> None:
     repository = ChannelRepository(session)
     # Create 3 channels for the first user
-    ch1 = await repository.create(
-        create_data_channel(channel_id=100, channel_name="one", user_id=user.id)
-    )
-    ch2 = await repository.create(
-        create_data_channel(channel_id=101, channel_name="two", user_id=user.id)
-    )
-    ch3 = await repository.create(
-        create_data_channel(channel_id=102, channel_name="three", user_id=user.id)
-    )
+    ch1 = await repository.create(create_data_channel(tg_id=100, name="one", user_id=user.id))
+    ch2 = await repository.create(create_data_channel(tg_id=101, name="two", user_id=user.id))
+    ch3 = await repository.create(create_data_channel(tg_id=102, name="three", user_id=user.id))
     # And one for the second
-    await repository.create(
-        create_data_channel(channel_id=200, channel_name="other", user_id=second_user.id)
-    )
+    await repository.create(create_data_channel(tg_id=200, name="other", user_id=second_user.id))
 
     channels = await repository.list_for_user(user.id, limit=10)
     assert [c.id for c in channels] == [ch1.id, ch2.id, ch3.id]
@@ -163,15 +145,9 @@ async def test_count_for_user(session: AsyncSession, user: User, second_user: Us
     assert await repository.count_for_user(user.id) == 0
     assert await repository.count_for_user(second_user.id) == 0
 
-    await repository.create(
-        create_data_channel(channel_id=100, channel_name="one", user_id=user.id)
-    )
-    await repository.create(
-        create_data_channel(channel_id=101, channel_name="two", user_id=user.id)
-    )
-    await repository.create(
-        create_data_channel(channel_id=200, channel_name="other", user_id=second_user.id)
-    )
+    await repository.create(create_data_channel(tg_id=100, name="one", user_id=user.id))
+    await repository.create(create_data_channel(tg_id=101, name="two", user_id=user.id))
+    await repository.create(create_data_channel(tg_id=200, name="other", user_id=second_user.id))
 
     assert await repository.count_for_user(user.id) == 2
     assert await repository.count_for_user(second_user.id) == 1
@@ -182,20 +158,20 @@ async def test_get_page(session: AsyncSession, user: User) -> None:
     # Creating 10 channels
     for i in range(10):
         await repository.create(
-            create_data_channel(channel_id=100 + i, channel_name=f"channel{i}", user_id=user.id)
+            create_data_channel(tg_id=100 + i, name=f"channel{i}", user_id=user.id)
         )
 
     page1 = await repository.get_page(user.id, page=1, per_page=8)
     assert len(page1.items) == 8
     assert page1.total == 10
-    assert page1.items[0].channel_id == 100
-    assert page1.items[-1].channel_id == 107
+    assert page1.items[0].tg_id == 100
+    assert page1.items[-1].tg_id == 107
 
     page2 = await repository.get_page(user.id, page=2, per_page=8)
     assert len(page2.items) == 2
     assert page2.total == 10
-    assert page2.items[0].channel_id == 108
-    assert page2.items[-1].channel_id == 109
+    assert page2.items[0].tg_id == 108
+    assert page2.items[-1].tg_id == 109
 
     with pytest.raises(ValueError):
         await repository.get_page(user.id, page=0)

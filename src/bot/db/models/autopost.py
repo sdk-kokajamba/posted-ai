@@ -2,21 +2,20 @@
 
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import ClassVar
 
 from sqlalchemy import (
-    BigInteger,
     Boolean,
     ForeignKey,
     ForeignKeyConstraint,
     Index,
-    Integer,
     String,
     UniqueConstraint,
     false,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
-from bot.db.base import Base, TimestampMixin
+from bot.db.base import Base, BigIntPK, TimestampMixin
 from bot.db.enums import enum_column
 from bot.db.updates import UNSET, UnsetType, UpdateDataBase
 
@@ -27,18 +26,16 @@ class AutoPostStatus(StrEnum):
     MODER = "moder"
 
 
-# BigInteger for PostgreSQL, INTEGER for SQLite (need for AUTOINCREMENT)
-BigIntPK = BigInteger().with_variant(Integer, "sqlite")
-
-
 class AutoPost(TimestampMixin, Base):
     """Auto-posting templates owned by users."""
 
     __tablename__ = "autoposts"
     __table_args__ = (
+        Index("ix_autoposts_channel_user", "channel_id", "user_id"),
         # Template names are unique per user.
         UniqueConstraint("user_id", "name", name="uq_autoposts_user_name"),
-        # Target for the composite FK from the ``autopost_prompts``
+        # Target for the composite FK from ``autoprompts``
+        # (fk_autoprompts_autopost_owner → autoposts.id, autoposts.user_id).
         UniqueConstraint("id", "user_id", name="uq_autoposts_id_user"),
         # Composite FK enforces "auto post belongs to a channel owned by the
         # same user" at the database level.
@@ -50,7 +47,7 @@ class AutoPost(TimestampMixin, Base):
         ),
         # Listings by status per user.
         Index("ix_autoposts_user_status", "user_id", "status"),
-        # Listings filtered by channel + status
+        # Listings per user, narrowed by channel and/or status.
         Index(
             "ix_autoposts_user_channel_status",
             "user_id",
@@ -64,19 +61,18 @@ class AutoPost(TimestampMixin, Base):
 
     user_id: Mapped[int] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"),
-        index=True,
         nullable=False,
     )
     # FK is declared only via the composite ForeignKeyConstraint above.
     channel_id: Mapped[int] = mapped_column(nullable=False)
     status: Mapped[AutoPostStatus] = mapped_column(
-        enum_column(AutoPostStatus),
+        enum_column(AutoPostStatus, name="status"),
         nullable=False,
         default=AutoPostStatus.MODER,
         server_default=AutoPostStatus.MODER.value,
     )
     name: Mapped[str] = mapped_column(String(128), nullable=False)
-    require_moderation: Mapped[bool] = mapped_column(
+    moderation: Mapped[bool] = mapped_column(
         Boolean,
         nullable=False,
         default=False,
@@ -92,7 +88,7 @@ class AutoPostCreateData:
     user_id: int
     channel_id: int
     name: str
-    require_moderation: bool = False
+    moderation: bool = False
     status: AutoPostStatus = AutoPostStatus.MODER
 
 
@@ -109,8 +105,8 @@ class AutoPostUpdateData(UpdateDataBase):
     channel_id: int | UnsetType = UNSET
     name: str | UnsetType = UNSET
     status: AutoPostStatus | UnsetType = UNSET
-    require_moderation: bool | UnsetType = UNSET
+    moderation: bool | UnsetType = UNSET
 
-    not_null_fields: frozenset[str] = frozenset(
-        {"channel_id", "name", "status", "require_moderation"}
+    not_null_fields: ClassVar[frozenset[str]] = frozenset(
+        {"channel_id", "name", "status", "moderation"}
     )

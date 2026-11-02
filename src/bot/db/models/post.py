@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import ClassVar
 
 from sqlalchemy import (
     BigInteger,
@@ -19,12 +20,9 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
-from bot.db.base import Base, TimestampMixin
+from bot.db.base import Base, BigIntPK, TimestampMixin
 from bot.db.enums import enum_column
 from bot.db.updates import UNSET, UnsetType, UpdateDataBase
-
-# BigInteger for PostgreSQL, INTEGER for SQLite (need for AUTOINCREMENT)
-BigIntPK = BigInteger().with_variant(Integer, "sqlite")
 
 
 class PostStatus(StrEnum):
@@ -46,7 +44,8 @@ class Post(TimestampMixin, Base):
 
     __tablename__ = "posts"
     __table_args__ = (
-        # Referenced by potential future composite FKs (e.g. AutoPostPrompt).
+        # Not referenced today; reserved for a future composite FK that would
+        # pin "same owner" at the DB level.
         UniqueConstraint("id", "user_id", name="uq_posts_id_user"),
         # Composite FK enforces "post belongs to a channel owned by the same user"
         # at the database level (target: uq_channels_id_user on ``channels``).
@@ -80,18 +79,17 @@ class Post(TimestampMixin, Base):
 
     user_id: Mapped[int] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"),
-        index=True,
         nullable=False,
     )
     channel_id: Mapped[int] = mapped_column(nullable=False)
     status: Mapped[PostStatus] = mapped_column(
-        enum_column(PostStatus),
+        enum_column(PostStatus, name="status"),
         nullable=False,
         default=PostStatus.MODER,
         server_default=PostStatus.MODER.value,
     )
     content_type: Mapped[ContentType] = mapped_column(
-        enum_column(ContentType),
+        enum_column(ContentType, name="content_type"),
         nullable=False,
         default=ContentType.TEXT,
         server_default=ContentType.TEXT.value,
@@ -147,13 +145,13 @@ class PostUpdateData(UpdateDataBase):
     theme: str | UnsetType = UNSET
     spoiler: bool | UnsetType = UNSET
 
-    text: str | UnsetType = UNSET
-    text_html: str | UnsetType = UNSET
-    media_id: str | UnsetType = UNSET
-    pub_date: int | UnsetType = UNSET
-    msg_id: int | UnsetType = UNSET
-    msg_delete: int | UnsetType = UNSET
+    text: str | UnsetType | None = UNSET
+    text_html: str | UnsetType | None = UNSET
+    media_id: str | UnsetType | None = UNSET
+    pub_date: int | UnsetType | None = UNSET
+    msg_id: int | UnsetType | None = UNSET
+    msg_delete: int | UnsetType | None = UNSET
 
-    not_null_fields: frozenset[str] = frozenset(
+    not_null_fields: ClassVar[frozenset[str]] = frozenset(
         {"channel_id", "status", "content_type", "theme", "spoiler"}
     )

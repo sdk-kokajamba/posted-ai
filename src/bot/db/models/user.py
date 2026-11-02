@@ -2,19 +2,27 @@
 
 from dataclasses import dataclass
 
-from sqlalchemy import BigInteger, Boolean, String, false
+from sqlalchemy import Boolean, Index, String, false, text
 from sqlalchemy.orm import Mapped, mapped_column
 
-from bot.db.base import Base, TimestampMixin
+from bot.db.base import Base, BigIntPK, TimestampMixin
 
 
 class User(TimestampMixin, Base):
     """A Telegram user who has interacted with the bot."""
 
     __tablename__ = "users"
+    __table_args__ = (
+        Index(
+            "ix_users_blocked",
+            "is_blocked",
+            postgresql_where=text("is_blocked = true"),
+            sqlite_where=text("is_blocked = 1"),
+        ),
+    )
 
     # The Telegram user ID is the primary key; the database never generates it.
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)
+    id: Mapped[int] = mapped_column(BigIntPK, primary_key=True, autoincrement=False)
     username: Mapped[str | None] = mapped_column(String(64))
     first_name: Mapped[str] = mapped_column(String(255))
     last_name: Mapped[str | None] = mapped_column(String(255))

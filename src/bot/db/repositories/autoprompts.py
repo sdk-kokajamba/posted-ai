@@ -1,20 +1,21 @@
 """Repository for auto prompt records."""
 
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any
 
-from sqlalchemy import Select, delete, func, or_, select, update
-from sqlalchemy.engine import CursorResult
+from sqlalchemy import Select, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.db.models import (
+    ALL_WEEKDAYS_MASK,
+    MINUTES_PER_DAY,
     AutoPost,
     AutoPrompt,
     AutoPromptCreateData,
-    AutoPromptStatus,
     AutoPromptUpdateData,
 )
+from bot.db.ownership import ensure_owned
 from bot.exceptions import (
     AutoPromptAutopostMismatchError,
     AutoPromptLimitExceededError,
@@ -47,28 +48,36 @@ class AutoPromptRepository:
         """Store a new prompt for the user's auto post.
 
         Raises:
-            ``ValueError``: ``prompt_text`` is empty or whitespace-only.
+            ``ValueError``: ``text`` is empty or whitespace-only, **or** the
+                schedule fields are inconsistent (out-of-range ``day_mask``,
+                minutes not in ``[0, 1440)``, ``time_end_min`` set without
+                ``time_start_min``, or ``time_end_min == time_start_min``).
             ``AutoPromptAutopostMismatchError``: the auto post does not
                 belong to the user.
             ``AutoPromptLimitExceededError``: the auto post already has
                 ``MAX_PROMPTS_PER_AUTOPOST`` prompts.
         """
-        if not data.prompt_text.strip():
-            raise ValueError("prompt_text must not be empty")
+        if not data.text.strip():
+            raise ValueError("text must not be empty")
+
+        # Cross-field validation: end without start, start==end, etc.
+        self._validate_schedule(data.day_mask, data.time_start_min, data.time_end_min)
 
         await self._ensure_autopost_belongs_to_user(data.user_id, data.autopost_id)
+        # Soft limit: not transactional, so a race between two concurrent
+        # ``create`` calls for the same autopost can overshoot by one. Acceptable
+        # for now; add a row-level lock on ``autoposts`` if it ever matters.
         if await self.count_for_autopost(data.autopost_id) >= MAX_PROMPTS_PER_AUTOPOST:
             raise AutoPromptLimitExceededError(data.autopost_id)
 
         prompt = AutoPrompt(
             user_id=data.user_id,
             autopost_id=data.autopost_id,
-            status=data.status,
-            req_moder=data.req_moder,
-            prompt_text=data.prompt_text,
+            text=data.text,
             tags=data.tags,
-            day_pub=data.day_pub,
-            time_pub=data.time_pub,
+            day_mask=data.day_mask,
+            time_start_min=data.time_start_min,
+            time_end_min=data.time_end_min,
         )
         self._session.add(prompt)
         try:
@@ -78,6 +87,13 @@ class AutoPromptRepository:
             # ``DbSessionMiddleware`` roll the transaction back.
             await self._session.flush()
         except IntegrityError as exc:  # pragma: no cover - race / FK safeguard
+            # ``_ensure_autopost_belongs_to_user`` and ``_validate_schedule``
+            # already cover the common cases. This catches a concurrent move
+            # of the autopost to another user, a schedule CHECK violation that
+            # slipped past ``_validate_schedule``, and the user FK if the user
+            # was deleted mid-request. All map to
+            # ``AutoPromptAutopostMismatchError`` — see the follow-up issue about
+            # splitting IntegrityError by constraint name.
             raise AutoPromptAutopostMismatchError(data.autopost_id) from exc
 
         return prompt
@@ -98,6 +114,10 @@ class AutoPromptRepository:
                 belongs to another user.
             ``AutoPromptAutopostMismatchError``: the new ``autopost_id``
                 does not belong to the user.
+            ``ValueError``: the resulting schedule is inconsistent — see
+                ``_validate_schedule`` for the exact conditions. Raised when
+                any of ``day_mask`` / ``time_start_min`` / ``time_end_min``
+                is part of ``data``.
         """
         prompt = await self.get(user_id, id)
         if prompt is None:
@@ -110,83 +130,30 @@ class AutoPromptRepository:
         if "autopost_id" in changes:
             await self._ensure_autopost_belongs_to_user(user_id, changes["autopost_id"])
 
+        # Validate the resulting schedule, not just the changed fields.
+        schedule_fields = {"day_mask", "time_start_min", "time_end_min"}
+        if schedule_fields & changes.keys():
+            self._validate_schedule(
+                changes.get("day_mask", prompt.day_mask),
+                changes.get("time_start_min", prompt.time_start_min),
+                changes.get("time_end_min", prompt.time_end_min),
+            )
+
         for name, value in changes.items():
             setattr(prompt, name, value)
 
         try:
             await self._session.flush()
         except IntegrityError as exc:  # pragma: no cover - race / FK safeguard
+            # Same rationale as ``create``: pre-checks already ran against the
+            # resulting state, so this branch is a race (autopost moved to
+            # another user) or a CHECK violation. Both map to
+            # ``AutoPromptAutopostMismatchError`` — see the follow-up issue.
             raise AutoPromptAutopostMismatchError(
                 changes.get("autopost_id", prompt.autopost_id),
             ) from exc
 
         return prompt
-
-    async def set_require_moderation(
-        self,
-        user_id: int,
-        id: int,
-        value: bool,
-    ) -> AutoPrompt:
-        prompt = await self.get(user_id, id)
-        if prompt is None:
-            raise AutoPromptNotFoundError(id)
-        prompt.req_moder = value
-        await self._session.flush()
-        return prompt
-
-    async def set_require_moderation_for_autopost(
-        self,
-        user_id: int,
-        autopost_id: int,
-        value: bool,
-    ) -> int:
-        statement = (
-            update(AutoPrompt)
-            .where(
-                AutoPrompt.user_id == user_id,
-                AutoPrompt.autopost_id == autopost_id,
-            )
-            .values(req_moder=value)
-            # Bulk UPDATE: keep in-session objects untouched.
-            .execution_options(synchronize_session=False)
-        )
-        result = await self._session.execute(statement)
-        result = cast("CursorResult[Any]", result)
-        return result.rowcount or 0
-
-    async def update_status(
-        self,
-        user_id: int,
-        id: int,
-        status: AutoPromptStatus,
-    ) -> AutoPrompt:
-        prompt = await self.get(user_id, id)
-        if prompt is None:
-            raise AutoPromptNotFoundError(id)
-        prompt.status = status
-        await self._session.flush()
-        return prompt
-
-    async def update_status_for_autopost(
-        self,
-        autopost_id: int,
-        status: AutoPromptStatus,
-    ) -> int:
-        """Bulk-update the status of every prompt attached to ``autopost_id``.
-
-        No ``user_id`` filter on purpose: called from the scheduler and cron
-        paths where the owner is not known up front.
-        """
-        statement = (
-            update(AutoPrompt)
-            .where(AutoPrompt.autopost_id == autopost_id)
-            .values(status=status)
-            .execution_options(synchronize_session=False)
-        )
-        result = await self._session.execute(statement)
-        result = cast("CursorResult[Any]", result)
-        return result.rowcount or 0
 
     async def delete(self, user_id: int, id: int) -> None:
         """Delete the user's auto prompt by ID.
@@ -200,19 +167,6 @@ class AutoPromptRepository:
             raise AutoPromptNotFoundError(id)
         await self._session.delete(prompt)
 
-    async def delete_for_autopost(self, user_id: int, autopost_id: int) -> int:
-        statement = (
-            delete(AutoPrompt)
-            .where(
-                AutoPrompt.user_id == user_id,
-                AutoPrompt.autopost_id == autopost_id,
-            )
-            .execution_options(synchronize_session=False)
-        )
-        result = await self._session.execute(statement)
-        result = cast("CursorResult[Any]", result)
-        return result.rowcount or 0
-
     # ------------------------------------------------------------------- read
 
     async def get(self, user_id: int, id: int) -> AutoPrompt | None:
@@ -222,53 +176,6 @@ class AutoPromptRepository:
                 AutoPrompt.id == id,
                 AutoPrompt.user_id == user_id,
             )
-        )
-
-    async def get_by_id(self, id: int) -> AutoPrompt | None:
-        """Return the prompt with the given ID regardless of owner.
-
-        Intended for internal paths (scheduler, cleanup) where ``id`` comes
-        from a trusted source, not from user input.
-        """
-        return await self._session.scalar(select(AutoPrompt).where(AutoPrompt.id == id))
-
-    async def get_autopost_id(self, user_id: int, id: int) -> int | None:
-        statement = (
-            select(AutoPrompt.autopost_id)
-            .where(AutoPrompt.id == id, AutoPrompt.user_id == user_id)
-            .limit(1)
-        )
-        return await self._session.scalar(statement)
-
-    async def get_text(self, user_id: int, id: int) -> str | None:
-        statement = (
-            select(AutoPrompt.prompt_text)
-            .where(AutoPrompt.id == id, AutoPrompt.user_id == user_id)
-            .limit(1)
-        )
-        return await self._session.scalar(statement)
-
-    async def list_ids_for_autopost(self, autopost_id: int) -> list[int]:
-        """Return the IDs of every prompt attached to ``autopost_id``."""
-        statement = select(AutoPrompt.id).where(AutoPrompt.autopost_id == autopost_id)
-        return list(await self._session.scalars(statement))
-
-    async def list_for_user_and_autopost(
-        self,
-        user_id: int,
-        autopost_id: int,
-        *,
-        status: AutoPromptStatus | None = None,
-        limit: int,
-        offset: int = 0,
-    ) -> list[AutoPrompt]:
-        """Return a page of the user's prompts for a specific auto post."""
-        return await self._list(
-            user_id,
-            autopost_id=autopost_id,
-            status=status,
-            limit=limit,
-            offset=offset,
         )
 
     async def count_for_autopost(self, autopost_id: int) -> int:
@@ -285,14 +192,12 @@ class AutoPromptRepository:
         user_id: int,
         *,
         autopost_id: int | None = None,
-        status: AutoPromptStatus | None = None,
     ) -> int:
-        """Return the number of prompts matching the given filters."""
+        """Return the number of prompts for ``user_id``, optionally narrowed to ``autopost_id``."""
         statement = self._apply_filters(
             select(func.count()).select_from(AutoPrompt),
             user_id=user_id,
             autopost_id=autopost_id,
-            status=status,
         )
         return int(await self._session.scalar(statement) or 0)
 
@@ -301,7 +206,6 @@ class AutoPromptRepository:
         user_id: int,
         *,
         autopost_id: int | None = None,
-        status: AutoPromptStatus | None = None,
         page: int = 1,
         per_page: int = PER_PAGE,
     ) -> AutoPromptPage:
@@ -313,14 +217,12 @@ class AutoPromptRepository:
         items = await self._list(
             user_id,
             autopost_id=autopost_id,
-            status=status,
             limit=per_page,
             offset=offset,
         )
         total = await self.count_for_user(
             user_id,
             autopost_id=autopost_id,
-            status=status,
         )
         return AutoPromptPage(items=items, total=total)
 
@@ -330,74 +232,13 @@ class AutoPromptRepository:
         autopost_id: int,
         page: int,
     ) -> AutoPromptPage:
-        """Return a one-item preview page of active prompts for an auto post."""
+        """Return a one-item page of the user's prompts for ``autopost_id``."""
         return await self.get_page(
             user_id,
             autopost_id=autopost_id,
-            status=AutoPromptStatus.ACT,
             page=page,
             per_page=1,
         )
-
-    async def exists(self, user_id: int, id: int) -> bool:
-        """Return ``True`` if the user has an auto prompt with the given ID."""
-        statement = (
-            select(AutoPrompt.id).where(AutoPrompt.id == id, AutoPrompt.user_id == user_id).limit(1)
-        )
-        return await self._session.scalar(statement) is not None
-
-    # ------------------------------------------------------------- bulk ops
-
-    async def delete_stale_moder(
-        self,
-        *,
-        user_id: int | None = None,
-        autopost_id: int | None = None,
-    ) -> int:
-        """Delete auto prompts stuck in ``AutoPostStatus.MODER``.
-
-        ``user_id`` / ``autopost_id`` optionally narrow the scope. Returns
-        the number of affected rows. Without filters the deletion is global
-        — intended for cron cleanup.
-        """
-        statement = delete(AutoPrompt).where(AutoPrompt.status == AutoPromptStatus.MODER)
-        if user_id is not None:
-            statement = statement.where(AutoPrompt.user_id == user_id)
-        if autopost_id is not None:
-            statement = statement.where(AutoPrompt.autopost_id == autopost_id)
-        statement = statement.execution_options(synchronize_session=False)
-
-        result = await self._session.execute(statement)
-        result = cast("CursorResult[Any]", result)
-        return result.rowcount or 0
-
-    async def delete_invalid(
-        self,
-        *,
-        user_id: int | None = None,
-        autopost_id: int | None = None,
-    ) -> int:
-        """Delete auto prompts with empty ``prompt_text``.
-
-        ``day_pub`` and ``time_pub`` are optional (nullable) and their
-        absence is not a validity violation, so they are not checked here.
-        Returns the number of affected rows.
-        """
-        statement = delete(AutoPrompt).where(
-            or_(
-                AutoPrompt.prompt_text.is_(None),
-                AutoPrompt.prompt_text == "",
-            ),
-        )
-        if user_id is not None:
-            statement = statement.where(AutoPrompt.user_id == user_id)
-        if autopost_id is not None:
-            statement = statement.where(AutoPrompt.autopost_id == autopost_id)
-        statement = statement.execution_options(synchronize_session=False)
-
-        result = await self._session.execute(statement)
-        result = cast("CursorResult[Any]", result)
-        return result.rowcount or 0
 
     # --------------------------------------------------------------- helpers
 
@@ -406,7 +247,6 @@ class AutoPromptRepository:
         user_id: int,
         *,
         autopost_id: int | None,
-        status: AutoPromptStatus | None,
         limit: int,
         offset: int,
     ) -> list[AutoPrompt]:
@@ -415,7 +255,6 @@ class AutoPromptRepository:
             select(AutoPrompt),
             user_id=user_id,
             autopost_id=autopost_id,
-            status=status,
         )
         statement = statement.order_by(AutoPrompt.id).limit(limit).offset(offset)
         return list(await self._session.scalars(statement))
@@ -426,13 +265,10 @@ class AutoPromptRepository:
         *,
         user_id: int,
         autopost_id: int | None,
-        status: AutoPromptStatus | None,
     ) -> Select[Any]:
         statement = statement.where(AutoPrompt.user_id == user_id)
         if autopost_id is not None:
             statement = statement.where(AutoPrompt.autopost_id == autopost_id)
-        if status is not None:
-            statement = statement.where(AutoPrompt.status == status)
         return statement
 
     async def _ensure_autopost_belongs_to_user(
@@ -444,13 +280,43 @@ class AutoPromptRepository:
 
         The composite FK on ``autoprompts`` is the hard guarantee; this
         pre-check exists purely to surface a clear domain exception before
-        ``flush`` — same pattern as ``_ensure_channel_belongs_to_user`` in
-        ``PostRepository`` and ``AutoPostRepository``.
+        ``flush``. Uses :func:`bot.db.ownership.ensure_owned` — same helper
+        as ``PostRepository._ensure_channel_belongs_to_user`` and
+        ``AutoPostRepository._ensure_channel_belongs_to_user``.
         """
-        statement = (
-            select(AutoPost.id)
-            .where(AutoPost.id == autopost_id, AutoPost.user_id == user_id)
-            .limit(1)
+        await ensure_owned(
+            self._session,
+            column_id=AutoPost.id,
+            column_user_id=AutoPost.user_id,
+            pk=autopost_id,
+            user_id=user_id,
+            error_factory=AutoPromptAutopostMismatchError,
         )
-        if await self._session.scalar(statement) is None:
-            raise AutoPromptAutopostMismatchError(autopost_id)
+
+    @staticmethod
+    def _validate_schedule(
+        day_mask: int | None,
+        time_start_min: int | None,
+        time_end_min: int | None,
+    ) -> None:
+        """Mirror the DB CHECK constraints — so callers get a clear
+        ``ValueError`` instead of an opaque ``IntegrityError`` from
+        ``flush()``."""
+        if day_mask is not None and not (0 < day_mask <= ALL_WEEKDAYS_MASK):
+            raise ValueError(f"day_mask out of range: {day_mask!r}")
+
+        for name, value in (("time_start_min", time_start_min), ("time_end_min", time_end_min)):
+            if value is not None and not (0 <= value < MINUTES_PER_DAY):
+                raise ValueError(f"{name} out of range: {value!r}")
+
+        if time_end_min is not None and time_start_min is None:
+            raise ValueError("time_end_min set without time_start_min")
+
+        if (
+            time_end_min is not None
+            and time_start_min is not None
+            and time_end_min == time_start_min
+        ):
+            raise ValueError(
+                "time_end_min equals time_start_min; use time_end_min=None for a single point"
+            )

@@ -1,5 +1,5 @@
 from dataclasses import fields
-from typing import Any, Final
+from typing import Any, ClassVar, Final
 
 from bot.exceptions import UpdateDataValidationError
 
@@ -29,14 +29,21 @@ UnsetType = _UnsetType
 class UpdateDataBase:
     """Mixin for partial-update payloads.
 
-    fields default to ``UNSET`` — "not supplied, leave untouched";
-    ``_not_null_fields`` lists columns that forbid explicit ``None``;
-    nullable columns can still be cleared with ``None``.
+    Per-field semantics:
+
+    field omitted → default ``UNSET`` → column is not touched;
+    ``field=None`` → column is set to SQL ``NULL``, onlyfor
+      nullable columns (non-nullable ones raise
+      :class:`UpdateDataValidationError` in ``__post_init__``);
+    ``field=<value>`` → column is set to ``<value>``.
+
+    Subclasses list their NOT NULL columns in ``not_null_fields`` —
+    it is a ``ClassVar`` and never participates in ``to_changes()``.
     """
 
     __slots__ = ()
 
-    not_null_fields: frozenset[str] = frozenset()
+    not_null_fields: ClassVar[frozenset[str]] = frozenset()
 
     def __post_init__(self) -> None:
         for f in fields(self):  # type: ignore[arg-type]
