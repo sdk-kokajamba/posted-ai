@@ -5,8 +5,8 @@ from typing import Any
 
 from sqlalchemy import Select, func, select
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import AsyncSession
 
+from bot.db.errors import ConstraintErrorMap, dual_constraint
 from bot.db.models import (
     AutoPost,
     AutoPostCreateData,
@@ -15,10 +15,12 @@ from bot.db.models import (
     Channel,
 )
 from bot.db.ownership import ensure_owned
+from bot.db.repositories.base import BaseRepository
 from bot.exceptions import (
     AutoPostChannelMismatchError,
     AutoPostNameTakenError,
     AutoPostNotFoundError,
+    InternalError,
 )
 
 PER_PAGE = 8
@@ -30,15 +32,52 @@ class AutoPostPage:
     total: int
 
 
-class AutoPostRepository:
+def _autopost_create_constraints(data: AutoPostCreateData) -> ConstraintErrorMap:
+    """Constraint map for ``AutoPostRepository.create``."""
+    return {
+        **dual_constraint(
+            "uq_autoposts_user_name",
+            "unique:autoposts.user_id,autoposts.name",
+            lambda: AutoPostNameTakenError(data.name),
+        ),
+        **dual_constraint(
+            "fk_autoposts_channel_owner",
+            "fk",
+            lambda: AutoPostChannelMismatchError(data.channel_id),
+        ),
+    }
+
+
+def _autopost_update_constraints(
+    original: AutoPost,
+    changes: dict[str, Any],
+) -> ConstraintErrorMap:
+    """Constraint map for ``AutoPostRepository.update``.
+
+    Uses the *effective* value for each column, since after a partial
+    update the effective value is what actually violated the constraint.
+    """
+    name = changes.get("name", original.name)
+    channel_id = changes.get("channel_id", original.channel_id)
+    return {
+        **dual_constraint(
+            "uq_autoposts_user_name",
+            "unique:autoposts.user_id,autoposts.name",
+            lambda: AutoPostNameTakenError(name),
+        ),
+        **dual_constraint(
+            "fk_autoposts_channel_owner",
+            "fk",
+            lambda: AutoPostChannelMismatchError(channel_id),
+        ),
+    }
+
+
+class AutoPostRepository(BaseRepository):
     """Data access for :class:`~bot.db.models.AutoPost`.
 
-    The repository never commits: the transaction is owned by
-    ``DbSessionMiddleware``.
+    The repository never commits: the transaction is owned by ``DbSessionMiddleware``.
     """
-
-    def __init__(self, session: AsyncSession) -> None:
-        self._session = session
 
     # ------------------------------------------------------------------ write
 
@@ -46,10 +85,11 @@ class AutoPostRepository:
         """Store a new auto post for the user.
 
         Raises:
-            ``AutoPostNameTakenError``: the user already has an auto post
-                with this name.
+            ``AutoPostNameTakenError``: the user already has an auto post with
+                this name.
             ``AutoPostChannelMismatchError``: the channel does not belong to
                 the user.
+            ``InternalError``: unrecognized ``IntegrityError``.
         """
         await self._ensure_name_is_free(data.user_id, data.name)
         await self._ensure_channel_belongs_to_user(data.user_id, data.channel_id)
@@ -63,20 +103,9 @@ class AutoPostRepository:
         )
         self._session.add(autopost)
         try:
-            # ``flush`` sends the INSERT but does not commit; we only need the
-            # generated ``id`` here. A failure leaves the session broken, so we
-            # translate the DB-level conflict into a domain exception and let
-            # ``DbSessionMiddleware`` roll the transaction back.
             await self._session.flush()
-        except IntegrityError as exc:  # pragma: no cover - race / FK safeguard
-            # Pre-checks above already cover the common cases. This catches a
-            # race between ``_ensure_name_is_free`` and the INSERT (unique name)
-            # AND the composite FK from ``fk_autoposts_channel_owner`` if the
-            # channel was moved/deleted concurrently. Both map to
-            # ``AutoPostNameTakenError`` here — see the follow-up issue about
-            # splitting the IntegrityError by constraint name.
-            raise AutoPostNameTakenError(data.name) from exc
-
+        except IntegrityError as exc:
+            raise self._translate_integrity_error(exc, _autopost_create_constraints(data)) from exc
         return autopost
 
     async def update(
@@ -91,16 +120,15 @@ class AutoPostRepository:
         ``field=None`` clears the column (nullable fields only).
 
         Raises:
-            ``AutoPostNotFoundError``: the auto post does not exist or
-                belongs to another user.
+            ``AutoPostNotFoundError``: the auto post does not exist or belongs
+                to another user.
             ``AutoPostChannelMismatchError``: the new ``channel_id`` does not
                 belong to the user.
             ``AutoPostNameTakenError``: the new ``name`` is already used by
                 another auto post of the same user.
+            ``InternalError``: unrecognized ``IntegrityError``.
         """
         autopost = await self.get(user_id, id)
-        if autopost is None:
-            raise AutoPostNotFoundError(id)
 
         changes = data.to_changes()
         if not changes:
@@ -122,13 +150,9 @@ class AutoPostRepository:
 
         try:
             await self._session.flush()
-        except IntegrityError as exc:  # pragma: no cover - race / FK safeguard
-            # Same rationale as ``create``: the only realistic IntegrityError
-            # here is a concurrent unique-name collision or the composite
-            # ``fk_autoposts_channel_owner`` moving underneath us. Both map to
-            # ``AutoPostNameTakenError`` — see the follow-up issue.
-            raise AutoPostNameTakenError(
-                changes.get("name", autopost.name),
+        except IntegrityError as exc:
+            raise self._translate_integrity_error(
+                exc, _autopost_update_constraints(autopost, changes)
             ) from exc
 
         return autopost
@@ -139,22 +163,33 @@ class AutoPostRepository:
         Raises:
             ``AutoPostNotFoundError``: the auto post does not exist or belongs
                 to another user.
+            ``InternalError``: ``IntegrityError`` while flushing the DELETE.
         """
         autopost = await self.get(user_id, id)
-        if autopost is None:
-            raise AutoPostNotFoundError(id)
-        await self._session.delete(autopost)
+        try:
+            await self._session.delete(autopost)
+            await self._session.flush()
+        except IntegrityError as exc:
+            raise InternalError() from exc
 
     # ------------------------------------------------------------------- read
 
-    async def get(self, user_id: int, id: int) -> AutoPost | None:
-        """Return the user's auto post with the given ID, or ``None``."""
-        return await self._session.scalar(
+    async def get(self, user_id: int, id: int) -> AutoPost:
+        """Return the user's auto post with the given ID.
+
+        Raises:
+            ``AutoPostNotFoundError``: the auto post does not exist or belongs
+                to another user.
+        """
+        autopost = await self._session.scalar(
             select(AutoPost).where(
                 AutoPost.id == id,
                 AutoPost.user_id == user_id,
             )
         )
+        if autopost is None:
+            raise AutoPostNotFoundError(autopost_id=id)
+        return autopost
 
     async def list_for_user(
         self,
@@ -200,7 +235,11 @@ class AutoPostRepository:
         page: int = 1,
         per_page: int = PER_PAGE,
     ) -> AutoPostPage:
-        """Return one page of the user's auto posts together with the total."""
+        """Return one page of the user's auto posts together with the total.
+
+        Raises:
+            ``ValueError``: ``page < 1`` (programmer error, not user input).
+        """
         if page < 1:
             raise ValueError(f"page must be >= 1, got {page}")
 

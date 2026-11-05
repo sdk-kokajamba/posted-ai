@@ -14,6 +14,10 @@ from bot.db.models.autoprompt import (
     AutoPromptUpdateData,
     Weekday,
 )
+from bot.db.models.base import (
+    Base,
+    utcnow,
+)
 from bot.db.models.channel import (
     Channel,
     ChannelCreateData,
@@ -44,6 +48,7 @@ __all__ = [
     "AutoPrompt",
     "AutoPromptCreateData",
     "AutoPromptUpdateData",
+    "Base",
     "Channel",
     "ChannelCreateData",
     "ContentType",
@@ -56,4 +61,5 @@ __all__ = [
     "User",
     "UserCreateData",
     "Weekday",
+    "utcnow",
 ]

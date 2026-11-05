@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from sqlalchemy import Boolean, Index, String, false, text
 from sqlalchemy.orm import Mapped, mapped_column
 
-from bot.db.base import Base, BigIntPK, TimestampMixin
+from bot.db.models.base import Base, BigIntPK, TimestampMixin
 
 
 class User(TimestampMixin, Base):

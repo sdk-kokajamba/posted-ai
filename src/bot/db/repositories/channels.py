@@ -4,10 +4,16 @@ from dataclasses import dataclass
 
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import AsyncSession
 
+from bot.db.errors import ConstraintErrorMap, dual_constraint
 from bot.db.models import Channel, ChannelCreateData
-from bot.exceptions import ChannelAlreadyExistsError, ChannelNameTakenError, ChannelNotFoundError
+from bot.db.repositories.base import BaseRepository
+from bot.exceptions import (
+    ChannelAlreadyExistsError,
+    ChannelNameTakenError,
+    ChannelNotFoundError,
+    InternalError,
+)
 
 PER_PAGE = 8
 
@@ -18,21 +24,42 @@ class ChannelPage:
     total: int
 
 
-class ChannelRepository:
+def _channel_create_constraints(data: ChannelCreateData) -> ConstraintErrorMap:
+    """Constraint map for ``ChannelRepository.create``.
+
+    Both UNIQUE constraints on ``channels`` can fire on INSERT:
+    ``uq_channels_user_name`` (per-user name) and ``uq_channels_tg_id``
+    (global Telegram ID).
+    """
+    return {
+        **dual_constraint(
+            "uq_channels_user_name",
+            "unique:channels.user_id,channels.name",
+            lambda: ChannelNameTakenError(data.name),
+        ),
+        **dual_constraint(
+            "uq_channels_tg_id",
+            "unique:channels.tg_id",
+            lambda: ChannelAlreadyExistsError(data.tg_id, data.name),
+        ),
+    }
+
+
+class ChannelRepository(BaseRepository):
     """Data access for :class:`~bot.db.models.Channel`.
 
     The repository never commits: the transaction is owned by ``DbSessionMiddleware``.
     """
-
-    def __init__(self, session: AsyncSession) -> None:
-        self._session = session
 
     async def create(self, data: ChannelCreateData) -> Channel:
         """Store a new channel for the user.
 
         Raises:
             ``ChannelNameTakenError``: the user already has a channel with this name.
-            ``ChannelAlreadyExistsError``: a channel with this Telegram ID is already stored.
+            ``ChannelAlreadyExistsError``: a channel with this Telegram ID is
+                already stored.
+            ``InternalError``: unrecognized ``IntegrityError`` (constraint did
+                not match any entry of the map).
         """
         await self._ensure_name_is_free(data.user_id, data.name)
 
@@ -43,41 +70,47 @@ class ChannelRepository:
         )
         self._session.add(channel)
         try:
-            # ``flush`` sends the INSERT but does not commit; we only need the
-            # generated ``id`` here. A failure leaves the session broken, so we
-            # translate the database-level conflict into a domain exception and
-            # let ``DbSessionMiddleware`` roll the transaction back.
             await self._session.flush()
-
-        except IntegrityError as exc:  # pragma: no cover - race safeguard
-            # Reached when ``tg_id`` (UNIQUE) collides. A foreign-key
-            # violation would land here too, but ``user_id`` is guaranteed to
-            # exist by the time the repository is called (UserMiddleware).
-            #
-            # Race safeguard: ``_ensure_name_is_free`` already rejects taken
-            # names, so a concurrent INSERT is the only realistic way for the
-            # ``uq_channels_user_name`` UNIQUE to be reached.
-            raise ChannelAlreadyExistsError(data.tg_id, data.name) from exc
-
+        except IntegrityError as exc:
+            # The pre-check rejects taken names; this branch catches the race
+            # between the check and the INSERT, and the tg_id UNIQUE that has
+            # no pre-check.
+            raise self._translate_integrity_error(exc, _channel_create_constraints(data)) from exc
         return channel
 
-    async def get(self, user_id: int, id: int) -> Channel | None:
-        """Return the user's channel with the given ID, or ``None``."""
-        return await self._session.scalar(
+    async def get(self, user_id: int, id: int) -> Channel:
+        """Return the user's channel with the given ID.
+
+        Raises:
+            ``ChannelNotFoundError``: the channel does not exist or belongs
+                to another user.
+        """
+        channel = await self._session.scalar(
             select(Channel).where(Channel.id == id, Channel.user_id == user_id)
         )
+        if channel is None:
+            raise ChannelNotFoundError(channel_id=id)
+        return channel
 
     async def delete(self, user_id: int, id: int) -> None:
         """Delete the user's channel by ID.
 
         Raises:
-            ``ChannelNotFoundError``: the channel does not exist or belongs to another user.
+            ``ChannelNotFoundError``: the channel does not exist or belongs
+                to another user.
+            ``InternalError``: ``IntegrityError`` while flushing the DELETE
+                (unexpected -- the composite FKs use ``ON DELETE CASCADE``).
         """
         channel = await self.get(user_id, id)
-        if channel is None:
-            raise ChannelNotFoundError(channel_id=id)
-
-        await self._session.delete(channel)
+        try:
+            await self._session.delete(channel)
+            # Flush so a CASCADE-related IntegrityError surfaces here, inside
+            # the repository, and is logged by ``InternalError`` with the DB
+            # traceback -- not in ``DbSessionMiddleware`` after the handler
+            # already returned.
+            await self._session.flush()
+        except IntegrityError as exc:
+            raise InternalError() from exc
 
     async def list_for_user(
         self,
@@ -108,7 +141,11 @@ class ChannelRepository:
         page: int,
         per_page: int = PER_PAGE,
     ) -> ChannelPage:
-        """Return one page of the user's channels together with the total count."""
+        """Return one page of the user's channels together with the total count.
+
+        Raises:
+            ``ValueError``: ``page < 1`` (programmer error, not user input).
+        """
         if page < 1:
             raise ValueError(f"page must be >= 1, got {page}")
 

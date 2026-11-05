@@ -5,8 +5,8 @@ from typing import Any
 
 from sqlalchemy import Select, func, select
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import AsyncSession
 
+from bot.db.errors import ConstraintErrorMap, dual_constraint
 from bot.db.models import (
     ALL_WEEKDAYS_MASK,
     MINUTES_PER_DAY,
@@ -16,10 +16,17 @@ from bot.db.models import (
     AutoPromptUpdateData,
 )
 from bot.db.ownership import ensure_owned
+from bot.db.repositories.base import BaseRepository
 from bot.exceptions import (
     AutoPromptAutopostMismatchError,
+    AutoPromptDayMaskError,
+    AutoPromptEmptyTextError,
     AutoPromptLimitExceededError,
     AutoPromptNotFoundError,
+    AutoPromptTimeEndWithoutStartError,
+    AutoPromptTimeEqualError,
+    AutoPromptTimeRangeError,
+    InternalError,
 )
 
 PER_PAGE = 8
@@ -32,15 +39,81 @@ class AutoPromptPage:
     total: int
 
 
-class AutoPromptRepository:
+def _autoprompt_constraints(
+    *,
+    autopost_id: int,
+    day_mask: int | None,
+    time_start_min: int | None,
+    time_end_min: int | None,
+) -> ConstraintErrorMap:
+    """Constraint map for both ``AutoPromptRepository.create`` and ``update``.
+
+    ``create`` passes the payload values; ``update`` passes the *effective*
+    values (changed value if present in the changes, otherwise the current
+    value of the row). Same code path, same error classes.
+    """
+    return {
+        **dual_constraint(
+            "fk_autoprompts_autopost_owner",
+            "fk",
+            lambda: AutoPromptAutopostMismatchError(autopost_id),
+        ),
+        **dual_constraint(
+            "ck_autoprompts_day_mask_range",
+            "check:ck_autoprompts_day_mask_range",
+            lambda: AutoPromptDayMaskError("day_mask", day_mask),
+        ),
+        **dual_constraint(
+            "ck_autoprompts_time_start_range",
+            "check:ck_autoprompts_time_start_range",
+            lambda: AutoPromptTimeRangeError("time_start_min", time_start_min),
+        ),
+        **dual_constraint(
+            "ck_autoprompts_time_end_range",
+            "check:ck_autoprompts_time_end_range",
+            lambda: AutoPromptTimeRangeError("time_end_min", time_end_min),
+        ),
+        **dual_constraint(
+            "ck_autoprompts_time_end_requires_start",
+            "check:ck_autoprompts_time_end_requires_start",
+            lambda: AutoPromptTimeEndWithoutStartError("time_end_min", time_end_min),
+        ),
+        **dual_constraint(
+            "ck_autoprompts_time_end_differs_from_start",
+            "check:ck_autoprompts_time_end_differs_from_start",
+            lambda: AutoPromptTimeEqualError("time_end_min", time_end_min),
+        ),
+    }
+
+
+def _autoprompt_create_constraints(data: AutoPromptCreateData) -> ConstraintErrorMap:
+    return _autoprompt_constraints(
+        autopost_id=data.autopost_id,
+        day_mask=data.day_mask,
+        time_start_min=data.time_start_min,
+        time_end_min=data.time_end_min,
+    )
+
+
+def _autoprompt_update_constraints(
+    original: AutoPrompt,
+    changes: dict[str, Any],
+) -> ConstraintErrorMap:
+    """Use the *effective* values, since after a partial update the effective
+    value is what actually violated the constraint."""
+    return _autoprompt_constraints(
+        autopost_id=changes.get("autopost_id", original.autopost_id),
+        day_mask=changes.get("day_mask", original.day_mask),
+        time_start_min=changes.get("time_start_min", original.time_start_min),
+        time_end_min=changes.get("time_end_min", original.time_end_min),
+    )
+
+
+class AutoPromptRepository(BaseRepository):
     """Data access for :class:`~bot.db.models.AutoPrompt`.
 
-    The repository never commits: the transaction is owned by
-    ``DbSessionMiddleware``.
+    The repository never commits: the transaction is owned by ``DbSessionMiddleware``.
     """
-
-    def __init__(self, session: AsyncSession) -> None:
-        self._session = session
 
     # ------------------------------------------------------------------ write
 
@@ -48,25 +121,29 @@ class AutoPromptRepository:
         """Store a new prompt for the user's auto post.
 
         Raises:
-            ``ValueError``: ``text`` is empty or whitespace-only, **or** the
-                schedule fields are inconsistent (out-of-range ``day_mask``,
-                minutes not in ``[0, 1440)``, ``time_end_min`` set without
-                ``time_start_min``, or ``time_end_min == time_start_min``).
+            ``AutoPromptEmptyTextError``: ``text`` is empty or whitespace-only.
+            ``AutoPromptDayMaskError``: ``day_mask`` outside ``[1, 127]``.
+            ``AutoPromptTimeRangeError``: a time is outside ``[0, 1440)``.
+            ``AutoPromptTimeEndWithoutStartError``: ``time_end_min`` set
+                without ``time_start_min``.
+            ``AutoPromptTimeEqualError``: ``time_end_min == time_start_min``.
             ``AutoPromptAutopostMismatchError``: the auto post does not
                 belong to the user.
             ``AutoPromptLimitExceededError``: the auto post already has
                 ``MAX_PROMPTS_PER_AUTOPOST`` prompts.
+            ``InternalError``: unrecognized ``IntegrityError``.
         """
         if not data.text.strip():
-            raise ValueError("text must not be empty")
+            raise AutoPromptEmptyTextError("text", data.text)
 
-        # Cross-field validation: end without start, start==end, etc.
+        # Cross-field validation: end without start, start == end, etc.
         self._validate_schedule(data.day_mask, data.time_start_min, data.time_end_min)
 
         await self._ensure_autopost_belongs_to_user(data.user_id, data.autopost_id)
         # Soft limit: not transactional, so a race between two concurrent
-        # ``create`` calls for the same autopost can overshoot by one. Acceptable
-        # for now; add a row-level lock on ``autoposts`` if it ever matters.
+        # ``create`` calls for the same autopost can overshoot by one.
+        # Acceptable for now; add a row-level lock on ``autoposts`` if it
+        # ever matters.
         if await self.count_for_autopost(data.autopost_id) >= MAX_PROMPTS_PER_AUTOPOST:
             raise AutoPromptLimitExceededError(data.autopost_id)
 
@@ -81,21 +158,11 @@ class AutoPromptRepository:
         )
         self._session.add(prompt)
         try:
-            # ``flush`` sends the INSERT but does not commit; we only need the
-            # generated ``id`` here. A failure leaves the session broken, so we
-            # translate the DB-level conflict into a domain exception and let
-            # ``DbSessionMiddleware`` roll the transaction back.
             await self._session.flush()
-        except IntegrityError as exc:  # pragma: no cover - race / FK safeguard
-            # ``_ensure_autopost_belongs_to_user`` and ``_validate_schedule``
-            # already cover the common cases. This catches a concurrent move
-            # of the autopost to another user, a schedule CHECK violation that
-            # slipped past ``_validate_schedule``, and the user FK if the user
-            # was deleted mid-request. All map to
-            # ``AutoPromptAutopostMismatchError`` — see the follow-up issue about
-            # splitting IntegrityError by constraint name.
-            raise AutoPromptAutopostMismatchError(data.autopost_id) from exc
-
+        except IntegrityError as exc:
+            raise self._translate_integrity_error(
+                exc, _autoprompt_create_constraints(data)
+            ) from exc
         return prompt
 
     async def update(
@@ -110,18 +177,19 @@ class AutoPromptRepository:
         ``field=None`` clears the column (nullable fields only).
 
         Raises:
-            ``AutoPromptNotFoundError``: the prompt does not exist or
-                belongs to another user.
-            ``AutoPromptAutopostMismatchError``: the new ``autopost_id``
-                does not belong to the user.
-            ``ValueError``: the resulting schedule is inconsistent — see
-                ``_validate_schedule`` for the exact conditions. Raised when
-                any of ``day_mask`` / ``time_start_min`` / ``time_end_min``
-                is part of ``data``.
+            ``AutoPromptNotFoundError``: the prompt does not exist or belongs
+                to another user.
+            ``AutoPromptAutopostMismatchError``: the new ``autopost_id`` does
+                not belong to the user.
+            ``AutoPromptDayMaskError``: resulting ``day_mask`` outside ``[1, 127]``.
+            ``AutoPromptTimeRangeError``: a resulting time is outside ``[0, 1440)``.
+            ``AutoPromptTimeEndWithoutStartError``: resulting ``time_end_min``
+                set without ``time_start_min``.
+            ``AutoPromptTimeEqualError``: resulting ``time_end_min`` equals
+                ``time_start_min``.
+            ``InternalError``: unrecognized ``IntegrityError``.
         """
         prompt = await self.get(user_id, id)
-        if prompt is None:
-            raise AutoPromptNotFoundError(id)
 
         changes = data.to_changes()
         if not changes:
@@ -144,13 +212,9 @@ class AutoPromptRepository:
 
         try:
             await self._session.flush()
-        except IntegrityError as exc:  # pragma: no cover - race / FK safeguard
-            # Same rationale as ``create``: pre-checks already ran against the
-            # resulting state, so this branch is a race (autopost moved to
-            # another user) or a CHECK violation. Both map to
-            # ``AutoPromptAutopostMismatchError`` — see the follow-up issue.
-            raise AutoPromptAutopostMismatchError(
-                changes.get("autopost_id", prompt.autopost_id),
+        except IntegrityError as exc:
+            raise self._translate_integrity_error(
+                exc, _autoprompt_update_constraints(prompt, changes)
             ) from exc
 
         return prompt
@@ -159,24 +223,35 @@ class AutoPromptRepository:
         """Delete the user's auto prompt by ID.
 
         Raises:
-            ``AutoPromptNotFoundError``: the prompt does not exist or
-                belongs to another user.
+            ``AutoPromptNotFoundError``: the prompt does not exist or belongs
+                to another user.
+            ``InternalError``: ``IntegrityError`` while flushing the DELETE.
         """
         prompt = await self.get(user_id, id)
-        if prompt is None:
-            raise AutoPromptNotFoundError(id)
-        await self._session.delete(prompt)
+        try:
+            await self._session.delete(prompt)
+            await self._session.flush()
+        except IntegrityError as exc:
+            raise InternalError() from exc
 
     # ------------------------------------------------------------------- read
 
-    async def get(self, user_id: int, id: int) -> AutoPrompt | None:
-        """Return the user's auto prompt with the given ID, or ``None``."""
-        return await self._session.scalar(
+    async def get(self, user_id: int, id: int) -> AutoPrompt:
+        """Return the user's auto prompt with the given ID.
+
+        Raises:
+            ``AutoPromptNotFoundError``: the prompt does not exist or belongs
+                to another user.
+        """
+        prompt = await self._session.scalar(
             select(AutoPrompt).where(
                 AutoPrompt.id == id,
                 AutoPrompt.user_id == user_id,
             )
         )
+        if prompt is None:
+            raise AutoPromptNotFoundError(prompt_id=id)
+        return prompt
 
     async def count_for_autopost(self, autopost_id: int) -> int:
         """Return the number of prompts attached to ``autopost_id``."""
@@ -193,7 +268,8 @@ class AutoPromptRepository:
         *,
         autopost_id: int | None = None,
     ) -> int:
-        """Return the number of prompts for ``user_id``, optionally narrowed to ``autopost_id``."""
+        """Return the number of prompts for ``user_id``, optionally narrowed
+        to ``autopost_id``."""
         statement = self._apply_filters(
             select(func.count()).select_from(AutoPrompt),
             user_id=user_id,
@@ -209,7 +285,11 @@ class AutoPromptRepository:
         page: int = 1,
         per_page: int = PER_PAGE,
     ) -> AutoPromptPage:
-        """Return one page of the user's prompts together with the total."""
+        """Return one page of the user's prompts together with the total.
+
+        Raises:
+            ``ValueError``: ``page < 1`` (programmer error, not user input).
+        """
         if page < 1:
             raise ValueError(f"page must be >= 1, got {page}")
 
@@ -250,7 +330,7 @@ class AutoPromptRepository:
         limit: int,
         offset: int,
     ) -> list[AutoPrompt]:
-        """Shared page query — ``autopost_id`` may be ``None`` (all autoposts)."""
+        """Shared page query -- ``autopost_id`` may be ``None`` (all autoposts)."""
         statement = self._apply_filters(
             select(AutoPrompt),
             user_id=user_id,
@@ -280,7 +360,7 @@ class AutoPromptRepository:
 
         The composite FK on ``autoprompts`` is the hard guarantee; this
         pre-check exists purely to surface a clear domain exception before
-        ``flush``. Uses :func:`bot.db.ownership.ensure_owned` — same helper
+        ``flush``. Uses :func:`bot.db.ownership.ensure_owned` -- same helper
         as ``PostRepository._ensure_channel_belongs_to_user`` and
         ``AutoPostRepository._ensure_channel_belongs_to_user``.
         """
@@ -299,24 +379,32 @@ class AutoPromptRepository:
         time_start_min: int | None,
         time_end_min: int | None,
     ) -> None:
-        """Mirror the DB CHECK constraints — so callers get a clear
-        ``ValueError`` instead of an opaque ``IntegrityError`` from
-        ``flush()``."""
-        if day_mask is not None and not (0 < day_mask <= ALL_WEEKDAYS_MASK):
-            raise ValueError(f"day_mask out of range: {day_mask!r}")
+        """Mirror the DB CHECK constraints -- so callers get a clear domain
+        error instead of an opaque ``IntegrityError`` from ``flush()``.
 
-        for name, value in (("time_start_min", time_start_min), ("time_end_min", time_end_min)):
+        Raises:
+            ``AutoPromptDayMaskError``: ``day_mask`` outside ``[1, 127]``.
+            ``AutoPromptTimeRangeError``: a time outside ``[0, 1440)``.
+            ``AutoPromptTimeEndWithoutStartError``: ``time_end_min`` set
+                without ``time_start_min``.
+            ``AutoPromptTimeEqualError``: ``time_end_min == time_start_min``.
+        """
+        if day_mask is not None and not (0 < day_mask <= ALL_WEEKDAYS_MASK):
+            raise AutoPromptDayMaskError("day_mask", day_mask)
+
+        for field_name, value in (
+            ("time_start_min", time_start_min),
+            ("time_end_min", time_end_min),
+        ):
             if value is not None and not (0 <= value < MINUTES_PER_DAY):
-                raise ValueError(f"{name} out of range: {value!r}")
+                raise AutoPromptTimeRangeError(field_name, value)
 
         if time_end_min is not None and time_start_min is None:
-            raise ValueError("time_end_min set without time_start_min")
+            raise AutoPromptTimeEndWithoutStartError("time_end_min", time_end_min)
 
         if (
             time_end_min is not None
             and time_start_min is not None
             and time_end_min == time_start_min
         ):
-            raise ValueError(
-                "time_end_min equals time_start_min; use time_end_min=None for a single point"
-            )
+            raise AutoPromptTimeEqualError("time_end_min", time_end_min)

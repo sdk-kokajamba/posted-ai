@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from sqlalchemy import ForeignKey, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
-from bot.db.base import Base, BigIntPK, TimestampMixin
+from bot.db.models.base import Base, BigIntPK, TimestampMixin
 
 
 class Prompt(TimestampMixin, Base):

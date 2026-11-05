@@ -3,6 +3,20 @@
 from bot.exceptions.base import DomainError
 
 
+class UserError(DomainError):
+    """Base for user-related domain errors."""
+
+
+class UserNotFoundError(UserError):
+    """Raised when the user with the given Telegram ID does not exist."""
+
+    user_message = "Пользователь не найден."
+
+    def __init__(self, user_id: int):
+        self.user_id = user_id
+        super().__init__(f"A user with the id {user_id} does not exist")
+
+
 class ChannelError(DomainError):
     """Base for channel-related domain errors."""
 

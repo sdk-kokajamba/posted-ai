@@ -4,10 +4,11 @@ from dataclasses import dataclass
 
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import AsyncSession
 
+from bot.db.errors import ConstraintErrorMap, dual_constraint
 from bot.db.models import Prompt, PromptCreateData
-from bot.exceptions import PromptNameTakenError, PromptNotFoundError
+from bot.db.repositories.base import BaseRepository
+from bot.exceptions import InternalError, PromptNameTakenError, PromptNotFoundError
 
 PER_PAGE = 8
 
@@ -18,24 +19,28 @@ class PromptPage:
     total: int
 
 
-class PromptRepository:
+def _prompt_create_constraints(data: PromptCreateData) -> ConstraintErrorMap:
+    """Constraint map for ``PromptRepository.create``."""
+    return dual_constraint(
+        "uq_prompts_user_name",
+        "unique:prompts.user_id,prompts.name",
+        lambda: PromptNameTakenError(data.name),
+    )
+
+
+class PromptRepository(BaseRepository):
     """Data access for :class:`~bot.db.models.Prompt`.
 
     The repository never commits: the transaction is owned by ``DbSessionMiddleware``.
-
-    ``create`` performs a pre-check for name uniqueness and additionally
-    translates DB-level ``IntegrityError`` as a race safeguard.
     """
-
-    def __init__(self, session: AsyncSession) -> None:
-        self._session = session
 
     async def create(self, data: PromptCreateData) -> Prompt:
         """Store a new prompt for the user.
 
         Raises:
-            ``PromptNameTakenError``: the user already has a prompt with this name
-                (including a race on the ``uq_prompts_user_name`` constraint).
+            ``PromptNameTakenError``: the user already has a prompt with this
+                name (including a race on ``uq_prompts_user_name``).
+            ``InternalError``: unrecognized ``IntegrityError``.
         """
         await self._ensure_name_is_free(data.user_id, data.name)
 
@@ -46,40 +51,39 @@ class PromptRepository:
         )
         self._session.add(prompt)
         try:
-            # ``flush`` sends the INSERT but does not commit; we only need the
-            # generated ``id`` here. A failure leaves the session broken, so we
-            # translate the database-level conflict into a domain exception and
-            # let ``DbSessionMiddleware`` roll the transaction back.
             await self._session.flush()
-        except IntegrityError as exc:  # pragma: no cover - race safeguard
-            # Reached when ``uq_prompts_user_name`` collides. A foreign-key
-            # violation would land here too, but ``user_id`` is guaranteed to
-            # exist by the time the repository is called (UserMiddleware).
-            #
-            # Race safeguard: ``_ensure_name_is_free`` already rejects taken
-            # names, so a concurrent INSERT (two handlers for the same user
-            # racing) is the only realistic way to reach this branch.
-            raise PromptNameTakenError(data.name) from exc
-
+        except IntegrityError as exc:
+            raise self._translate_integrity_error(exc, _prompt_create_constraints(data)) from exc
         return prompt
 
-    async def get(self, user_id: int, id: int) -> Prompt | None:
-        """Return the user's prompt with the given ID, or ``None``."""
-        return await self._session.scalar(
+    async def get(self, user_id: int, id: int) -> Prompt:
+        """Return the user's prompt with the given ID.
+
+        Raises:
+            ``PromptNotFoundError``: the prompt does not exist or belongs to
+                another user.
+        """
+        prompt = await self._session.scalar(
             select(Prompt).where(Prompt.id == id, Prompt.user_id == user_id)
         )
+        if prompt is None:
+            raise PromptNotFoundError(prompt_id=id)
+        return prompt
 
     async def delete(self, user_id: int, id: int) -> None:
         """Delete the user's prompt by ID.
 
         Raises:
-            ``PromptNotFoundError``: the prompt does not exist or belongs to another user.
+            ``PromptNotFoundError``: the prompt does not exist or belongs to
+                another user.
+            ``InternalError``: ``IntegrityError`` while flushing the DELETE.
         """
         prompt = await self.get(user_id, id)
-        if prompt is None:
-            raise PromptNotFoundError(prompt_id=id)
-
-        await self._session.delete(prompt)
+        try:
+            await self._session.delete(prompt)
+            await self._session.flush()
+        except IntegrityError as exc:
+            raise InternalError() from exc
 
     async def list_for_user(
         self,
@@ -110,7 +114,11 @@ class PromptRepository:
         page: int,
         per_page: int = PER_PAGE,
     ) -> PromptPage:
-        """Return one page of the user's prompts together with the total count."""
+        """Return one page of the user's prompts together with the total count.
+
+        Raises:
+            ``ValueError``: ``page < 1`` (programmer error, not user input).
+        """
         if page < 1:
             raise ValueError(f"page must be >= 1, got {page}")
 

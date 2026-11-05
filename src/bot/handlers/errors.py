@@ -17,16 +17,19 @@ USER_ERROR_TEXT = "Что-то пошло не так. Мы уже разбир�
 async def on_error(event: ErrorEvent) -> bool:
     """Log the exception and tell the user that something went wrong."""
     update = event.update
+    exc = event.exception
     logger.error(
         "Unhandled exception while processing update %s",
         update.update_id,
-        exc_info=event.exception,
+        exc_info=exc,
     )
     try:
+        user_message: str = getattr(exc, "user_message", USER_ERROR_TEXT)
+
         if update.message is not None:
-            await update.message.answer(USER_ERROR_TEXT)
+            await update.message.answer(user_message)
         elif update.callback_query is not None:
-            await update.callback_query.answer(USER_ERROR_TEXT, show_alert=True)
+            await update.callback_query.answer(user_message)
     except TelegramAPIError:
         logger.warning("Could not notify the user about the error")
     return True

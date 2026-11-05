@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from sqlalchemy import BigInteger, ForeignKey, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
-from bot.db.base import Base, BigIntPK, TimestampMixin
+from bot.db.models.base import Base, BigIntPK, TimestampMixin
 
 
 class Channel(TimestampMixin, Base):

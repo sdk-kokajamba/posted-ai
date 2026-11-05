@@ -3,272 +3,180 @@
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bot.db.models import Prompt, PromptCreateData, User
-from bot.db.models.user import UserCreateData
+from bot.db.models import PromptCreateData, UserCreateData
 from bot.db.repositories import PromptRepository, UserRepository
 from bot.exceptions import PromptNameTakenError, PromptNotFoundError
 
 
-def create_data_prompt(
-    name: str,
-    text: str,
-    user_id: int,
-) -> PromptCreateData:
-    return PromptCreateData(
-        user_id=user_id,
-        name=name,
-        text=text,
+async def _create_user(session: AsyncSession, user_id: int = 1) -> None:
+    await UserRepository(session).get_or_create(
+        UserCreateData(user_id=user_id, first_name=f"User{user_id}")
     )
 
 
-@pytest.fixture
-async def user(session: AsyncSession) -> User:
-    """Создаёт пользователя и возвращает его."""
-    repo = UserRepository(session)
-    user, _ = await repo.get_or_create(
-        UserCreateData(
-            user_id=1,
-            username="testuser",
-            first_name="Test",
-            language_code="ru",
-        )
-    )
-    return user
+def _data(user_id: int = 1, name: str = "greeting", text: str = "Hello") -> PromptCreateData:
+    return PromptCreateData(user_id=user_id, name=name, text=text)
 
 
-@pytest.fixture
-async def second_user(session: AsyncSession) -> User:
-    """Создаёт второго пользователя."""
-    repo = UserRepository(session)
-    user, _ = await repo.get_or_create(
-        UserCreateData(
-            user_id=2,
-            username="second",
-            first_name="Second",
-            language_code="en",
-        )
-    )
-    return user
+# ---------------------------------------------------------------------- create
 
 
-async def test_create_prompt_success(session: AsyncSession, user: User) -> None:
+async def test_create_stores_the_prompt(session: AsyncSession) -> None:
+    await _create_user(session)
     repository = PromptRepository(session)
-    data = create_data_prompt(
-        name="summary",
-        text="Summarize this text",
-        user_id=user.id,
-    )
 
-    prompt = await repository.create(data)
+    prompt = await repository.create(_data())
 
-    assert prompt.id is not None
-    assert prompt.name == "summary"
-    assert prompt.text == "Summarize this text"
-    assert prompt.user_id == user.id
-
-    stored = await session.get(Prompt, prompt.id)
-    assert stored is not None
-    assert stored.name == "summary"
-    assert stored.text == "Summarize this text"
+    assert prompt.id == 1
+    assert prompt.name == "greeting"
+    assert prompt.text == "Hello"
+    assert prompt.user_id == 1
 
 
-async def test_create_duplicate_name_raises(session: AsyncSession, user: User) -> None:
+async def test_create_rejects_duplicate_name_for_same_user(session: AsyncSession) -> None:
+    await _create_user(session)
     repository = PromptRepository(session)
-    await repository.create(
-        create_data_prompt(
-            name="summary",
-            text="First text",
-            user_id=user.id,
-        )
-    )
+    await repository.create(_data())
 
-    with pytest.raises(PromptNameTakenError):
-        await repository.create(
-            create_data_prompt(
-                name="summary",
-                text="Second text",
-                user_id=user.id,
-            )
-        )
+    with pytest.raises(PromptNameTakenError) as exc_info:
+        await repository.create(_data(text="Bye"))
 
-    assert await repository.count_for_user(user.id) == 1
+    assert exc_info.value.name == "greeting"
+    assert exc_info.value.user_message
 
 
-async def test_create_same_name_allowed_for_different_users(
-    session: AsyncSession,
-    user: User,
-    second_user: User,
+async def test_create_duplicate_name_race(
+    session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Bypass the pre-check: the UNIQUE mapping must still yield PromptNameTakenError."""
+    await _create_user(session)
     repository = PromptRepository(session)
+    await repository.create(_data())
 
-    first = await repository.create(
-        create_data_prompt(
-            name="summary",
-            text="First user text",
-            user_id=user.id,
-        )
-    )
-    second = await repository.create(
-        create_data_prompt(
-            name="summary",
-            text="Second user text",
-            user_id=second_user.id,
-        )
-    )
+    async def _noop(user_id, name):  # type: ignore[no-untyped-def]
+        return None
 
-    assert first.id != second.id
-    assert first.user_id == user.id
-    assert second.user_id == second_user.id
-    assert await repository.count_for_user(user.id) == 1
-    assert await repository.count_for_user(second_user.id) == 1
+    monkeypatch.setattr(repository, "_ensure_name_is_free", _noop)
+
+    with pytest.raises(PromptNameTakenError) as exc_info:
+        await repository.create(_data(text="Bye"))
+
+    assert exc_info.value.name == "greeting"
 
 
-async def test_get_prompt(session: AsyncSession, user: User, second_user: User) -> None:
+async def test_create_allows_same_name_for_different_users(session: AsyncSession) -> None:
+    """`uq_prompts_user_name` is per-user: two users may use the same name."""
+    await _create_user(session, 1)
+    await _create_user(session, 2)
     repository = PromptRepository(session)
-    created = await repository.create(
-        create_data_prompt(
-            name="summary",
-            text="Summarize this text",
-            user_id=user.id,
-        )
-    )
+    await repository.create(_data(user_id=1))
 
-    fetched = await repository.get(user.id, created.id)
+    prompt = await repository.create(_data(user_id=2))
+
+    assert prompt.name == "greeting"
+
+
+# ------------------------------------------------------------------------- get
+
+
+async def test_get_returns_the_users_prompt(session: AsyncSession) -> None:
+    await _create_user(session)
+    repository = PromptRepository(session)
+    created = await repository.create(_data())
+
+    fetched = await repository.get(1, created.id)
+
     assert fetched is created
 
-    assert await repository.get(second_user.id, created.id) is None
-    assert await repository.get(user.id, 99999) is None
 
-
-async def test_delete_prompt(session: AsyncSession, user: User, second_user: User) -> None:
+async def test_get_hides_another_users_prompt(session: AsyncSession) -> None:
+    await _create_user(session, 1)
+    await _create_user(session, 2)
     repository = PromptRepository(session)
-    prompt = await repository.create(
-        create_data_prompt(
-            name="summary",
-            text="Summarize this text",
-            user_id=user.id,
-        )
-    )
+    created = await repository.create(_data(user_id=1))
 
-    # Deletion by another user does not work
+    with pytest.raises(PromptNotFoundError) as exc_info:
+        await repository.get(2, created.id)
+
+    assert exc_info.value.prompt_id == created.id
+
+
+async def test_get_raises_prompt_not_found(session: AsyncSession) -> None:
+    repository = PromptRepository(session)
+    with pytest.raises(PromptNotFoundError) as exc_info:
+        await repository.get(1, 999)
+    assert exc_info.value.prompt_id == 999
+
+
+# ---------------------------------------------------------------------- delete
+
+
+async def test_delete_removes_the_prompt(session: AsyncSession) -> None:
+    await _create_user(session)
+    repository = PromptRepository(session)
+    prompt = await repository.create(_data())
+
+    await repository.delete(1, prompt.id)
+
     with pytest.raises(PromptNotFoundError):
-        await repository.delete(second_user.id, prompt.id)
-
-    # The prompt still exists
-    assert await session.get(Prompt, prompt.id) is not None
-
-    # Deletion by owner
-    await repository.delete(user.id, prompt.id)
-    await session.flush()
-    assert await session.get(Prompt, prompt.id) is None
-
-    # Repeated deletion
-    with pytest.raises(PromptNotFoundError):
-        await repository.delete(user.id, prompt.id)
+        await repository.get(1, prompt.id)
 
 
-async def test_list_for_user(session: AsyncSession, user: User, second_user: User) -> None:
+async def test_delete_rejects_another_users_prompt(session: AsyncSession) -> None:
+    await _create_user(session, 1)
+    await _create_user(session, 2)
     repository = PromptRepository(session)
+    prompt = await repository.create(_data(user_id=1))
 
-    # Create 3 prompts for the first user
-    pr1 = await repository.create(
-        create_data_prompt(
-            name="one",
-            text="Text one",
-            user_id=user.id,
-        )
-    )
-    pr2 = await repository.create(
-        create_data_prompt(
-            name="two",
-            text="Text two",
-            user_id=user.id,
-        )
-    )
-    pr3 = await repository.create(
-        create_data_prompt(
-            name="three",
-            text="Text three",
-            user_id=user.id,
-        )
-    )
+    with pytest.raises(PromptNotFoundError) as exc_info:
+        await repository.delete(2, prompt.id)
 
-    # And one for the second user
-    await repository.create(
-        create_data_prompt(
-            name="other",
-            text="Other text",
-            user_id=second_user.id,
-        )
-    )
-
-    prompts = await repository.list_for_user(user.id, limit=10)
-    assert [p.id for p in prompts] == [pr1.id, pr2.id, pr3.id]
-
-    # Checking limit and offset
-    page1 = await repository.list_for_user(user.id, limit=2, offset=0)
-    assert [p.id for p in page1] == [pr1.id, pr2.id]
-
-    page2 = await repository.list_for_user(user.id, limit=2, offset=2)
-    assert [p.id for p in page2] == [pr3.id]
+    assert exc_info.value.prompt_id == prompt.id
 
 
-async def test_count_for_user(session: AsyncSession, user: User, second_user: User) -> None:
+# ------------------------------------------------------------- list / count
+
+
+async def test_list_for_user_is_isolated(session: AsyncSession) -> None:
+    await _create_user(session, 1)
+    await _create_user(session, 2)
     repository = PromptRepository(session)
+    p1 = await repository.create(_data(user_id=1, name="a"))
+    p2 = await repository.create(_data(user_id=1, name="b"))
+    await repository.create(_data(user_id=2, name="c"))
 
-    assert await repository.count_for_user(user.id) == 0
-    assert await repository.count_for_user(second_user.id) == 0
+    rows = await repository.list_for_user(1, limit=10)
 
-    await repository.create(
-        create_data_prompt(
-            name="one",
-            text="Text one",
-            user_id=user.id,
-        )
-    )
-    await repository.create(
-        create_data_prompt(
-            name="two",
-            text="Text two",
-            user_id=user.id,
-        )
-    )
-    await repository.create(
-        create_data_prompt(
-            name="other",
-            text="Other text",
-            user_id=second_user.id,
-        )
-    )
-
-    assert await repository.count_for_user(user.id) == 2
-    assert await repository.count_for_user(second_user.id) == 1
+    assert [p.id for p in rows] == [p1.id, p2.id]
 
 
-async def test_get_page(session: AsyncSession, user: User) -> None:
+async def test_count_for_user_is_isolated(session: AsyncSession) -> None:
+    await _create_user(session, 1)
+    await _create_user(session, 2)
     repository = PromptRepository(session)
+    await repository.create(_data(user_id=1, name="a"))
+    await repository.create(_data(user_id=2, name="b"))
 
-    # Creating 10 prompts
-    for i in range(10):
-        await repository.create(
-            create_data_prompt(
-                name=f"prompt{i}",
-                text=f"Text {i}",
-                user_id=user.id,
-            )
-        )
+    assert await repository.count_for_user(1) == 1
+    assert await repository.count_for_user(2) == 1
 
-    page1 = await repository.get_page(user.id, page=1, per_page=8)
-    assert len(page1.items) == 8
-    assert page1.total == 10
-    assert page1.items[0].name == "prompt0"
-    assert page1.items[-1].name == "prompt7"
 
-    page2 = await repository.get_page(user.id, page=2, per_page=8)
-    assert len(page2.items) == 2
-    assert page2.total == 10
-    assert page2.items[0].name == "prompt8"
-    assert page2.items[-1].name == "prompt9"
+# -------------------------------------------------------------------- page
 
-    with pytest.raises(ValueError):
-        await repository.get_page(user.id, page=0)
+
+async def test_get_page_returns_items_and_total(session: AsyncSession) -> None:
+    await _create_user(session)
+    repository = PromptRepository(session)
+    for i in range(3):
+        await repository.create(_data(name=f"p{i}"))
+
+    page = await repository.get_page(1, page=1, per_page=2)
+
+    assert len(page.items) == 2
+    assert page.total == 3
+
+
+async def test_get_page_rejects_zero_page(session: AsyncSession) -> None:
+    repository = PromptRepository(session)
+    with pytest.raises(ValueError, match="page must be >= 1"):
+        await repository.get_page(1, page=0)

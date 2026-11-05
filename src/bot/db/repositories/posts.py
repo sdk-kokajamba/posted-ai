@@ -7,9 +7,8 @@ from typing import Any, cast
 from sqlalchemy import Select, and_, delete, func, or_, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from bot.db.base import utcnow
+from bot.db.errors import ConstraintErrorMap, dual_constraint
 from bot.db.models import (
     Channel,
     ContentType,
@@ -18,8 +17,11 @@ from bot.db.models import (
     PostStatus,
     PostUpdateData,
 )
+from bot.db.models.base import utcnow
 from bot.db.ownership import ensure_owned
+from bot.db.repositories.base import BaseRepository
 from bot.exceptions import (
+    InternalError,
     PostChannelMismatchError,
     PostContentTypeMismatchError,
     PostNotFoundError,
@@ -34,22 +36,68 @@ class PostPage:
     total: int
 
 
-class PostRepository:
+def _post_create_constraints(data: PostCreateData) -> ConstraintErrorMap:
+    """Constraint map for ``PostRepository.create``."""
+    return {
+        **dual_constraint(
+            "fk_posts_channel_owner",
+            "fk",
+            lambda: PostChannelMismatchError(data.channel_id),
+        ),
+        **dual_constraint(
+            "ck_posts_content_matches_type",
+            "check:ck_posts_content_matches_type",
+            lambda: PostContentTypeMismatchError(str(data.content_type)),
+        ),
+    }
+
+
+def _post_update_constraints(
+    original: Post,
+    changes: dict[str, Any],
+) -> ConstraintErrorMap:
+    """Constraint map for ``PostRepository.update``.
+
+    Uses the *effective* value for each column: after a partial update,
+    either the changed value or the row's current value is what actually
+    violated the constraint.
+    """
+    channel_id = changes.get("channel_id", original.channel_id)
+    content_type = changes.get("content_type", original.content_type)
+    return {
+        **dual_constraint(
+            "fk_posts_channel_owner",
+            "fk",
+            lambda: PostChannelMismatchError(channel_id),
+        ),
+        **dual_constraint(
+            "ck_posts_content_matches_type",
+            "check:ck_posts_content_matches_type",
+            lambda: PostContentTypeMismatchError(str(content_type)),
+        ),
+    }
+
+
+class PostRepository(BaseRepository):
     """Data access for :class:`~bot.db.models.Post`.
 
     The repository never commits: the transaction is owned by ``DbSessionMiddleware``.
     """
 
-    def __init__(self, session: AsyncSession) -> None:
-        self._session = session
-
     # ------------------------------------------------------------------ read
 
-    async def get(self, user_id: int, id: int) -> Post | None:
-        """Return the user's post with the given ID, or ``None``."""
-        return await self._session.scalar(
+    async def get(self, user_id: int, id: int) -> Post:
+        """Return the user's post with the given ID.
+
+        Raises:
+            ``PostNotFoundError``: the post does not exist or belongs to another user.
+        """
+        post = await self._session.scalar(
             select(Post).where(Post.id == id, Post.user_id == user_id)
         )
+        if post is None:
+            raise PostNotFoundError(post_id=id)
+        return post
 
     async def list_for_user(
         self,
@@ -105,7 +153,11 @@ class PostRepository:
         page: int = 1,
         per_page: int = PER_PAGE,
     ) -> PostPage:
-        """Return one page of the user's posts together with the total count."""
+        """Return one page of the user's posts together with the total count.
+
+        Raises:
+            ``ValueError``: ``page < 1`` (programmer error, not user input).
+        """
         if page < 1:
             raise ValueError(f"page must be >= 1, got {page}")
 
@@ -131,7 +183,9 @@ class PostRepository:
 
         Raises:
             ``PostChannelMismatchError``: the channel does not belong to the user.
-            ``PostContentTypeMismatchError``: content does not match ``content_type``.
+            ``PostContentTypeMismatchError``: content does not match
+                ``content_type``.
+            ``InternalError``: unrecognized ``IntegrityError``.
         """
         await self._ensure_channel_belongs_to_user(data.user_id, data.channel_id)
         self._ensure_content_matches_type(data.content_type, data.text, data.media_id)
@@ -152,15 +206,8 @@ class PostRepository:
         self._session.add(post)
         try:
             await self._session.flush()
-        except IntegrityError as exc:  # pragma: no cover - race / FK safeguard
-            # Pre-checks above cover the common cases. This catches a race
-            # between ``_ensure_content_matches_type`` and the INSERT (check
-            # constraint) AND the composite FK from ``fk_posts_channel_owner``
-            # if the channel was moved/deleted concurrently. Both map to
-            # ``PostContentTypeMismatchError`` here — see the follow-up issue
-            # about splitting IntegrityError by constraint name.
-            raise PostContentTypeMismatchError(str(data.content_type)) from exc
-
+        except IntegrityError as exc:
+            raise self._translate_integrity_error(exc, _post_create_constraints(data)) from exc
         return post
 
     async def update(
@@ -176,12 +223,13 @@ class PostRepository:
 
         Raises:
             ``PostNotFoundError``: the post does not exist or belongs to another user.
-            ``PostChannelMismatchError``: the new ``channel_id`` does not belong to the user.
-            ``PostContentTypeMismatchError``: the resulting content does not match ``content_type``.
+            ``PostChannelMismatchError``: the new ``channel_id`` does not
+                belong to the user.
+            ``PostContentTypeMismatchError``: the resulting content does not
+                match ``content_type``.
+            ``InternalError``: unrecognized ``IntegrityError``.
         """
         post = await self.get(user_id, id)
-        if post is None:
-            raise PostNotFoundError(id)
 
         changes = data.to_changes()
         if not changes:
@@ -204,13 +252,10 @@ class PostRepository:
 
         try:
             await self._session.flush()
-        except IntegrityError as exc:  # pragma: no cover - race / FK safeguard
-            # Content check and channel ownership are pre-validated above; a
-            # concurrent move of the channel (or its deletion) is the only
-            # realistic IntegrityError path here. Both cases map to
-            # ``PostContentTypeMismatchError`` — see the follow-up issue about
-            # splitting IntegrityError by constraint name.
-            raise PostContentTypeMismatchError(str(post.content_type)) from exc
+        except IntegrityError as exc:
+            raise self._translate_integrity_error(
+                exc, _post_update_constraints(post, changes)
+            ) from exc
 
         return post
 
@@ -219,11 +264,14 @@ class PostRepository:
 
         Raises:
             ``PostNotFoundError``: the post does not exist or belongs to another user.
+            ``InternalError``: ``IntegrityError`` while flushing the DELETE.
         """
         post = await self.get(user_id, id)
-        if post is None:
-            raise PostNotFoundError(id)
-        await self._session.delete(post)
+        try:
+            await self._session.delete(post)
+            await self._session.flush()
+        except IntegrityError as exc:
+            raise InternalError() from exc
 
     # ------------------------------------------------------------- bulk ops
 
@@ -236,11 +284,13 @@ class PostRepository:
         """Archive active posts whose ``pub_date`` is in the past.
 
         ``now`` is supplied by the caller (unix timestamp) so the repository
-        does not decide what "now" is — this keeps tests deterministic.
+        does not decide what "now" is -- this keeps tests deterministic.
         ``updated_at`` is also generated in Python (``utcnow()``) so its
         storage format matches the ORM paths (see ``TimestampMixin``) on
         both PostgreSQL and SQLite.
-        Returns the number of affected rows.
+
+        Returns:
+            The number of affected rows.
         """
         conditions: list[Any] = [
             Post.status == PostStatus.ACT,
@@ -254,7 +304,7 @@ class PostRepository:
             update(Post)
             .where(*conditions)
             .values(status=PostStatus.ARCH, updated_at=utcnow())
-            # Bulk UPDATE: keep in-session objects untouched — the caller owns
+            # Bulk UPDATE: keep in-session objects untouched -- the caller owns
             # the transaction and may hold ``Post`` instances that must not be
             # silently mutated by this background sweep.
             .execution_options(synchronize_session=False)
@@ -266,17 +316,20 @@ class PostRepository:
         return result.rowcount or 0
 
     async def delete_invalid_moder(self, *, older_than: datetime) -> int:
-        """Delete moderation posts with empty content or older than ``older_than``.
+        """Delete moderation posts older than ``older_than`` with empty content.
 
         ``older_than`` is a ``datetime`` because ``created_at`` is a DateTime
         column; passing an int (unix timestamp) would compare a datetime
         string against a number and silently match everything or nothing.
-        Returns the number of affected rows.
+
+        Returns:
+            The number of affected rows.
         """
         statement = (
             delete(Post)
             .where(
                 Post.status == PostStatus.MODER,
+                Post.created_at < older_than,
                 or_(
                     and_(
                         Post.content_type == ContentType.TEXT,
@@ -284,12 +337,8 @@ class PostRepository:
                     ),
                     and_(
                         Post.content_type.in_([ContentType.PHOTO, ContentType.VIDEO]),
-                        or_(
-                            Post.media_id.is_(None),
-                            Post.media_id == "",
-                        ),
+                        or_(Post.media_id.is_(None), Post.media_id == ""),
                     ),
-                    Post.created_at < older_than,
                 ),
             )
             # Bulk DELETE: keep in-session objects untouched.
@@ -297,7 +346,6 @@ class PostRepository:
         )
         result = await self._session.execute(statement)
 
-        # Cast the result to ``CursorResult`` so the type checker knows .rowcount exists.
         result = cast("CursorResult[Any]", result)
         return result.rowcount or 0
 
@@ -311,7 +359,9 @@ class PostRepository:
 
         Uses ``pub_date`` (not ``created_at``): the retention window starts
         when the post is actually published.
-        Returns the number of affected rows.
+
+        Returns:
+            The number of affected rows.
         """
         statement = (
             delete(Post)
@@ -325,7 +375,6 @@ class PostRepository:
         )
         result = await self._session.execute(statement)
 
-        # Cast the result to ``CursorResult`` so the type checker knows .rowcount exists.
         result = cast("CursorResult[Any]", result)
         return result.rowcount or 0
 

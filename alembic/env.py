@@ -10,8 +10,8 @@ from sqlalchemy.engine import Connection
 # Importing the models registers them on ``Base.metadata`` for autogenerate.
 import bot.db.models  # noqa: F401
 from bot.config import DatabaseSettings
-from bot.db.base import Base
 from bot.db.engine import create_engine
+from bot.db.models.base import Base
 
 config = context.config
 

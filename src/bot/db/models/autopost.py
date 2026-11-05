@@ -15,8 +15,8 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
-from bot.db.base import Base, BigIntPK, TimestampMixin
 from bot.db.enums import enum_column
+from bot.db.models.base import Base, BigIntPK, TimestampMixin
 from bot.db.updates import UNSET, UnsetType, UpdateDataBase
 
 
