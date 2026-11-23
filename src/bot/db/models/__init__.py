@@ -1,17 +1,12 @@
 """ORM models. Import every model here so Alembic autogenerate can see it."""
 
 from bot.db.models.autopost import (
+    ALL_WEEKDAYS_MASK,
+    MINUTES_PER_DAY,
     AutoPost,
     AutoPostCreateData,
     AutoPostStatus,
     AutoPostUpdateData,
-)
-from bot.db.models.autoprompt import (
-    ALL_WEEKDAYS_MASK,
-    MINUTES_PER_DAY,
-    AutoPrompt,
-    AutoPromptCreateData,
-    AutoPromptUpdateData,
     Weekday,
 )
 from bot.db.models.base import (
@@ -45,9 +40,6 @@ __all__ = [
     "AutoPostCreateData",
     "AutoPostStatus",
     "AutoPostUpdateData",
-    "AutoPrompt",
-    "AutoPromptCreateData",
-    "AutoPromptUpdateData",
     "Base",
     "Channel",
     "ChannelCreateData",

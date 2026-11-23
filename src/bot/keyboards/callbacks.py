@@ -4,25 +4,28 @@ from enum import StrEnum
 
 from aiogram.filters.callback_data import CallbackData
 
+from bot.db.models import PostStatus
+
 
 class MenuAction(StrEnum):
-    PROFILE = "profile"
-    FORM = "form"
-    HELP = "help"
+    MAIN = "main"
 
 
 class MenuCallback(CallbackData, prefix="menu"):
-    """Buttons of the main menu."""
-
     action: MenuAction
 
 
-class FormAction(StrEnum):
-    CONFIRM = "confirm"
-    CANCEL = "cancel"
+class ChannelAction(StrEnum):
+    BIND = "bind"
 
 
-class FormCallback(CallbackData, prefix="form"):
-    """Buttons of the demo form."""
+class ChannelCallback(CallbackData, prefix="channel"):
+    action: ChannelAction
 
-    action: FormAction
+
+class PostAction(StrEnum):
+    CARD = "card"
+
+
+class PostCallback(CallbackData, prefix="posts"):
+    action: PostAction | PostStatus

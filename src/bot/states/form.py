@@ -1,4 +1,4 @@
-"""States of the demo form."""
+"""States of the form."""
 
 from aiogram.fsm.state import State, StatesGroup
 

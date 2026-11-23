@@ -1,7 +1,7 @@
 from dataclasses import fields
 from typing import Any, ClassVar, Final
 
-from bot.exceptions import UpdateDataValidationError
+from bot.exceptions.db import UpdateDataValidationError
 
 
 class _UnsetType:
@@ -49,10 +49,7 @@ class UpdateDataBase:
         for f in fields(self):  # type: ignore[arg-type]
             value = getattr(self, f.name)
             if value is None and f.name in self.not_null_fields:
-                raise UpdateDataValidationError(
-                    model_name=type(self).__name__,
-                    field_name=f.name,
-                )
+                raise UpdateDataValidationError()
 
     def to_changes(self) -> dict[str, Any]:
         """Return only the fields explicitly set on this instance."""

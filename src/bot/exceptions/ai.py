@@ -1,0 +1,19 @@
+from bot.exceptions.base import DomainError
+
+
+class AIError(DomainError): ...
+
+
+class AITimeoutError(AIError): ...
+
+
+class AIUnavailableError(AIError): ...
+
+
+class AIEmptyResponseError(AIError): ...
+
+
+class AIContentRejectedError(AIError): ...
+
+
+class AIBusyError(AIError): ...

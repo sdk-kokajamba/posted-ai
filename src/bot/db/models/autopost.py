@@ -1,17 +1,18 @@
 """AutoPost model."""
 
 from dataclasses import dataclass
-from enum import StrEnum
+from enum import IntEnum, StrEnum
 from typing import ClassVar
 
 from sqlalchemy import (
-    Boolean,
+    CheckConstraint,
     ForeignKey,
     ForeignKeyConstraint,
     Index,
+    SmallInteger,
     String,
     UniqueConstraint,
-    false,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -22,37 +23,96 @@ from bot.db.updates import UNSET, UnsetType, UpdateDataBase
 
 class AutoPostStatus(StrEnum):
     ACT = "act"
+    PAUSED = "paused"
     ARCH = "arch"
-    MODER = "moder"
+
+
+class Weekday(IntEnum):
+    """ISO weekday — matches ``datetime.weekday()`` (Mon=0 … Sun=6)."""
+
+    MON = 0
+    TUE = 1
+    WED = 2
+    THU = 3
+    FRI = 4
+    SAT = 5
+    SUN = 6
+
+
+# Sanity constants — used in CheckConstraints and Schedule helpers.
+MINUTES_PER_DAY = 24 * 60  # 1440
+ALL_WEEKDAYS_MASK = (1 << 7) - 1  # 0b1111111 == 127
 
 
 class AutoPost(TimestampMixin, Base):
-    """Auto-posting templates owned by users."""
+    """Scheduled publication rules for a prompt in a channel."""
 
     __tablename__ = "autoposts"
     __table_args__ = (
-        Index("ix_autoposts_channel_user", "channel_id", "user_id"),
-        # Template names are unique per user.
-        UniqueConstraint("user_id", "name", name="uq_autoposts_user_name"),
-        # Target for the composite FK from ``autoprompts``
-        # (fk_autoprompts_autopost_owner → autoposts.id, autoposts.user_id).
-        UniqueConstraint("id", "user_id", name="uq_autoposts_id_user"),
-        # Composite FK enforces "auto post belongs to a channel owned by the
-        # same user" at the database level.
+        # Names are unique per channel: the user manages autoposts as a
+        # per-channel list, so "Утренний" only needs to be unambiguous
+        # inside the channel, not across the whole account.
+        UniqueConstraint(
+            "user_id",
+            "channel_id",
+            "name",
+            name="uq_autoposts_user_channel_name",
+        ),
+        # Composite FK enforces "auto post belongs to a channel owned by
+        # the same user" at the database level.
         ForeignKeyConstraint(
             ["channel_id", "user_id"],
             ["channels.id", "channels.user_id"],
             ondelete="CASCADE",
             name="fk_autoposts_channel_owner",
         ),
-        # Listings by status per user.
-        Index("ix_autoposts_user_status", "user_id", "status"),
-        # Listings per user, narrowed by channel and/or status.
+        # Composite FK enforces "auto post uses a prompt owned by the
+        # same user". CASCADE on prompt delete is intentional: the user
+        # is shown the exact list of autoposts that will be removed
+        # before confirming, so the delete is never silent.
+        ForeignKeyConstraint(
+            ["prompt_id", "user_id"],
+            ["prompts.id", "prompts.user_id"],
+            ondelete="CASCADE",
+            name="fk_autoposts_prompt_owner",
+        ),
+        # Listings per channel, narrowed by status.
         Index(
             "ix_autoposts_user_channel_status",
             "user_id",
             "channel_id",
             "status",
+        ),
+        # The scheduler scans every active autopost on each tick; a
+        # partial index keeps that scan small regardless of how many
+        # paused/archived autoposts accumulate.
+        Index(
+            "ix_autoposts_active",
+            "status",
+            postgresql_where=text("status = 'act'"),
+            sqlite_where=text("status = 'act'"),
+        ),
+        # ---- schedule validation -------------------------------------------
+        # bitmask in [1, 127]: at least one weekday selected, no unknown bits.
+        CheckConstraint(
+            "day_mask > 0 AND day_mask <= 127",
+            name="day_mask_range",
+        ),
+        # minutes from midnight in [0, 1439].
+        CheckConstraint(
+            "start_minute >= 0 AND start_minute < 1440",
+            name="start_minute_range",
+        ),
+        CheckConstraint(
+            "end_minute IS NULL OR (end_minute >= 0 AND end_minute < 1440)",
+            name="end_minute_range",
+        ),
+        # start == end is ambiguous (zero-length vs full-day) — reject it.
+        # ``end_minute IS NULL`` is the "exactly at start" case, which is
+        # valid and distinct from a zero-length window.
+        CheckConstraint(
+            "end_minute IS NULL OR end_minute <> start_minute",
+            name="end_minute_differs_from_start",
         ),
     )
 
@@ -63,33 +123,57 @@ class AutoPost(TimestampMixin, Base):
         ForeignKey("users.id", ondelete="CASCADE"),
         nullable=False,
     )
-    # FK is declared only via the composite ForeignKeyConstraint above.
+    # FKs to ``channels`` and ``prompts`` are declared only via the
+    # composite ForeignKeyConstraints above.
     channel_id: Mapped[int] = mapped_column(nullable=False)
+    prompt_id: Mapped[int] = mapped_column(nullable=False)
+
     status: Mapped[AutoPostStatus] = mapped_column(
         enum_column(AutoPostStatus, name="status"),
         nullable=False,
-        default=AutoPostStatus.MODER,
-        server_default=AutoPostStatus.MODER.value,
+        default=AutoPostStatus.ACT,
+        server_default=AutoPostStatus.ACT.value,
     )
     name: Mapped[str] = mapped_column(String(128), nullable=False)
-    moderation: Mapped[bool] = mapped_column(
-        Boolean,
-        nullable=False,
-        default=False,
-        server_default=false(),
-    )
+
+    # Appended after the prompt text — channel-wide signature, hashtags,
+    # etc. Bounded because the prompt body + footer together must fit
+    # Telegram's 4096-char message limit; keeping the footer short
+    # guarantees the body always has room.
+    footer: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+    # ---- schedule ----------------------------------------------------------
+    # Days of week as a bitmask: bit 0 = Monday, bit 6 = Sunday.
+    # At least one bit is always set — CHECK rejects zero.
+    # ``day_mask & (1 << weekday)`` is non-zero on an active day.
+    day_mask: Mapped[int] = mapped_column(SmallInteger, nullable=False)
+
+    # Publication time, in minutes from midnight (0..1439).
+    #   start=X, end=None       → exactly at X
+    #   start=X, end=Y, X <  Y  → [X, Y] inclusive (same day)
+    #   start=X, end=Y, X >  Y  → [X, 1440) ∪ [0, Y] (overnight window)
+    start_minute: Mapped[int] = mapped_column(SmallInteger, nullable=False)
+    end_minute: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
 
     def __repr__(self) -> str:
-        return f"AutoPost(id={self.id}, name={self.name!r}, status={self.status.value!r})"
+        return (
+            f"AutoPost(id={self.id}, name={self.name!r}, "
+            f"status={self.status.value!r}, "
+            f"channel_id={self.channel_id}, prompt_id={self.prompt_id})"
+        )
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
 class AutoPostCreateData:
     user_id: int
     channel_id: int
+    prompt_id: int
     name: str
-    moderation: bool = False
-    status: AutoPostStatus = AutoPostStatus.MODER
+    day_mask: int
+    start_minute: int
+    end_minute: int | None = None
+    footer: str | None = None
+    status: AutoPostStatus = AutoPostStatus.ACT
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
@@ -100,13 +184,30 @@ class AutoPostUpdateData(UpdateDataBase):
     — "leave the column untouched" — and are skipped by :meth:`to_changes`.
     Passing ``field=None`` explicitly clears the column (only valid for
     nullable fields; non-nullable ones raise :class:`UpdateDataValidationError`).
+
+    ``footer`` and ``end_minute`` are nullable; passing ``None``
+    explicitly clears them. ``day_mask`` and ``start_minute`` are
+    NOT NULL columns and therefore cannot be cleared. Use
+    :class:`~bot.db.schedule.Schedule` to convert user input.
     """
 
     channel_id: int | UnsetType = UNSET
+    prompt_id: int | UnsetType = UNSET
     name: str | UnsetType = UNSET
     status: AutoPostStatus | UnsetType = UNSET
-    moderation: bool | UnsetType = UNSET
+    day_mask: int | UnsetType = UNSET
+    start_minute: int | UnsetType = UNSET
+
+    footer: str | UnsetType | None = UNSET
+    end_minute: int | UnsetType | None = UNSET
 
     not_null_fields: ClassVar[frozenset[str]] = frozenset(
-        {"channel_id", "name", "status", "moderation"}
+        {
+            "channel_id",
+            "prompt_id",
+            "name",
+            "status",
+            "day_mask",
+            "start_minute",
+        }
     )

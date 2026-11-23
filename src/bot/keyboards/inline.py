@@ -3,23 +3,26 @@
 from aiogram.types import InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from bot.keyboards.callbacks import FormAction, FormCallback, MenuAction, MenuCallback
+from bot.db.models import PostStatus
+from bot.keyboards.callbacks import (
+    ChannelAction,
+    ChannelCallback,
+    MenuAction,
+    MenuCallback,
+    PostCallback,
+)
 
 
-def main_menu_keyboard() -> InlineKeyboardMarkup:
-    """Main menu shown after /start."""
+def menu_new_user_inline() -> InlineKeyboardMarkup:
+    """Main menu shown after /start if new user"""
     builder = InlineKeyboardBuilder()
-    builder.button(text="👤 Профиль", callback_data=MenuCallback(action=MenuAction.PROFILE))
-    builder.button(text="📝 Анкета", callback_data=MenuCallback(action=MenuAction.FORM))
-    builder.button(text="ℹ️ Помощь", callback_data=MenuCallback(action=MenuAction.HELP))
-    builder.adjust(2, 1)
+    builder.button(text="Привязать канал", callback_data=ChannelCallback(action=ChannelAction.BIND))
+    builder.button(text="Пропустить, осмотрюсь", callback_data=MenuCallback(action=MenuAction.MAIN))
     return builder.as_markup()
 
 
-def form_confirm_keyboard() -> InlineKeyboardMarkup:
-    """Confirm / cancel buttons of the demo form."""
+def menu_return_user_inline() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    builder.button(text="✅ Подтвердить", callback_data=FormCallback(action=FormAction.CONFIRM))
-    builder.button(text="❌ Отмена", callback_data=FormCallback(action=FormAction.CANCEL))
-    builder.adjust(2)
+    builder.button(text="Открыть меню", callback_data=MenuCallback(action=MenuAction.MAIN))
+    builder.button(text="Мои посты", callback_data=PostCallback(action=PostStatus.ACT))
     return builder.as_markup()

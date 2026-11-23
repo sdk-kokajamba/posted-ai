@@ -2,14 +2,12 @@
 
 from aiogram import Router
 
-from bot.handlers import admin, common, errors, fallback, form, membership, profile
+from bot.handlers import admin, common, errors, fallback, membership
 
 router = Router(name="root")
 router.include_routers(
     admin.router,
     common.router,
-    profile.router,
-    form.router,
     membership.router,
     errors.router,
     # The fallback router must stay last: it answers everything nobody else handled.

@@ -11,7 +11,7 @@ from collections.abc import Callable
 
 from sqlalchemy.exc import IntegrityError
 
-from bot.exceptions import BotError, DomainError, InternalError
+from bot.exceptions.base import BotError, DomainError, InternalError
 
 logger = logging.getLogger(__name__)
 

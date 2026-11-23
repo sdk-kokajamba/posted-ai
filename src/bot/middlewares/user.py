@@ -40,11 +40,17 @@ class UserMiddleware(BaseMiddleware):
             language_code=tg_user.language_code,
         )
         user, created = await UserRepository(session).get_or_create(profile)
-        # Persist right away: the connection goes back to the pool before the handler talks
-        # to Telegram, and SQLite does not keep its write lock during that time.
-        await session.commit()
+
+        # Commit only when there is something to write. This still releases the SQLite
+        # write lock before the handler talks to Telegram (which is the reason we commit
+        # eagerly at all), but skips an empty commit on the common "user already exists,
+        # profile unchanged" path.
+        if created or session.new or session.dirty or session.deleted:
+            await session.commit()
+
         if created:
             logger.info("New user registered: %s", user)
 
+        data["created"] = created
         data["user"] = user
         return await handler(event, data)

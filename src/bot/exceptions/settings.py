@@ -1,0 +1,13 @@
+from bot.exceptions.base import DomainError
+
+
+class SettingsError(DomainError): ...
+
+
+class TimezoneParseError(SettingsError): ...
+
+
+class ReportTimeParseError(SettingsError): ...
+
+
+class DeleteConfirmationError(SettingsError): ...

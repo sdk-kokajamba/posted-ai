@@ -1,5 +1,6 @@
 """Per-update database session."""
 
+import logging
 from typing import Any
 
 from aiogram import BaseMiddleware
@@ -7,6 +8,8 @@ from aiogram.types import TelegramObject
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bot.middlewares.types import Handler
+
+logger = logging.getLogger(__name__)
 
 
 class DbSessionMiddleware(BaseMiddleware):
@@ -28,6 +31,21 @@ class DbSessionMiddleware(BaseMiddleware):
     ) -> Any:
         async with self._session_factory() as session:
             data["session"] = session
-            result = await handler(event, data)
-            await session.commit()
+            try:
+                result = await handler(event, data)
+            except Exception:
+                await session.rollback()
+                raise
+
+            # Skip the empty commit when nothing was written (common case after
+            # UserMiddleware already committed the profile refresh).
+            if session.new or session.dirty or session.deleted:
+                logger.debug(
+                    "Committing session changes: new=%d, dirty=%d, deleted=%d",
+                    len(session.new),
+                    len(session.dirty),
+                    len(session.deleted),
+                )
+                await session.commit()
+                logger.debug("Session commit completed successfully")
             return result
